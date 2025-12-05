@@ -36,12 +36,12 @@ check_dependency() {
 check_dependency "curl" "curl (用于下载配置)"
 check_dependency "yq" "yq (用于解析 YAML 配置，例如: sudo apt install yq 或 brew install yq)"
 check_dependency "jq" "jq (用于解析 JSON/Base64 节点信息，例如: sudo apt install jq 或 brew install jq)"
-check_dependency "nc" "netcat/nc (用于 UDP 测试，例如: sudo apt install netcat-openbsd 或 brew install netcat)"
+check_dependency "nc" "netcat/nc (用于 TCP/UDP 测试，例如: sudo apt install netcat-openbsd 或 brew install netcat)"
 
 # 清理旧文件
 rm -f "$TEMP_URI_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
-# 【修复】确保所有后续要读取的文件都存在，即使是空的
+# 确保所有后续要读取的文件都存在，即使是空的
 touch "$TCP_SUCCESS_FILE" "$OUTPUT_FILE" "$HOSTS_PORTS_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
@@ -82,7 +82,7 @@ echo "--- 提取唯一的 HOST:PORT (来自 YAML 和 URI) ---"
 while read -r host port; do
     HOST_PORT_KEY="$host:$port"
     UNIQUE_HOSTS["$HOST_PORT_KEY"]=1
-done < "$HOSTS_PORTS_FILE" # <-- 修正的重定向
+done < "$HOSTS_PORTS_FILE"
 
 # B. 处理来自 URI 的结果
 while read -r line; do
@@ -119,7 +119,7 @@ while read -r line; do
     fi
     unset host port
     
-done < "$TEMP_URI_FILE" # <-- 修正的重定向
+done < "$TEMP_URI_FILE"
 
 TOTAL_TESTS=$(wc -l < "$HOSTS_PORTS_FILE")
 echo "总共找到并去重 $TOTAL_TESTS 个待测 HOST:PORT 组合。"
@@ -128,23 +128,20 @@ rm -f "$TEMP_URI_FILE"
 # --- 3. 执行 TCP 连通性测试 (新增延迟测量) ---
 echo "--- 开始 TCP 连通性测试 (超时: $TIMEOUT_SECONDS 秒, 并行度: $PARALLEL_JOBS) ---"
 
-# 使用函数包装测试逻辑，以更好地处理时间和输出
+# 【修复后的 TCP 测试函数 - 使用 nc 替换 /dev/tcp，更稳定】
 tcp_test() {
     local host="$1"
     local port="$2"
     local abs_success_file="$3" # 接收绝对路径
-    local start_time=$(date +%s%N) # 纳秒级开始时间
-    local end_time
-
-    # 使用 timeout 和 /dev/tcp 进行连接尝试
-    timeout "${TIMEOUT_SECONDS}" bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
-    local exit_code=$?
     
-    end_time=$(date +%s%N) # 纳秒级结束时间
-
-    if [ $exit_code -eq 0 ]; then
+    # 记录开始时间
+    local start_time=$(date +%s%N)
+    
+    # 使用 timeout 和 nc -z (零输入/输出模式) 进行连接检查
+    # -w 1 设置 nc 自身的连接超时为 1 秒，并被外部的 timeout 3 秒包裹
+    if timeout "${TIMEOUT_SECONDS}" nc -z -w 1 "$host" "$port" 2>/dev/null; then
+        local end_time=$(date +%s%N)
         # 计算毫秒延迟 (ns / 1,000,000)
-        # 注意：bash 默认不支持浮点数运算，这里使用整数除法
         local latency_ms=$(( (end_time - start_time) / 1000000 ))
         
         # 使用传入的绝对路径写入文件
@@ -179,7 +176,7 @@ cat "$TCP_SUCCESS_FILE" | xargs -n 3 -P "$PARALLEL_JOBS" bash -c '
     latency="$3"
     abs_output_file="'"$ABS_OUTPUT_FILE"'" # 获取绝对路径
     
-    # UDP 连接测试 (使用 nc -zuv，注意: nc 的 UDP 连通性测试并不总是可靠，但这是常见的 bash 做法)
+    # UDP 连接测试 (使用 nc -zuv)
     if timeout '"$TIMEOUT_SECONDS"' nc -zuv $host $port 2>/dev/null; then
         # 使用绝对路径写入最终结果文件
         echo "$host:$port (TCP Latency: ${latency}ms)" >> "$abs_output_file"
