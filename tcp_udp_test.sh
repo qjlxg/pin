@@ -4,12 +4,7 @@
 # 要测试的远程配置文件链接
 CONFIG_URLS=(
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
-    "https://raw.githubusercontent.com/qjlxg/aggregator/refs/heads/main/data/clash.yaml"
-    "https://raw.githubusercontent.com/qjlxg/aggregator/refs/heads/main/data/520.yaml"
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/all_unique_nodes.txt"
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/link.yaml"
-    "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt"
+   
 )
 # 减少超时时间为 1 秒，加快失败节点的跳过速度
 TIMEOUT_SECONDS=1
@@ -22,10 +17,14 @@ HOSTS_PORTS_FILE="temp_hosts_to_test.txt"
 TCP_SUCCESS_FILE="tcp_success_list.txt" 
 OUTPUT_FILE="working_nodes_full.txt"
 
+# 【关键修复】计算文件的绝对路径，确保 xargs 子进程能够找到并写入
+ABS_TCP_SUCCESS_FILE="$(pwd)/$TCP_SUCCESS_FILE"
+ABS_OUTPUT_FILE="$(pwd)/$OUTPUT_FILE"
+
 # 清理旧文件
 rm -f "$TEMP_URI_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
-# 【重要修复】确保成功文件存在，即使为空，防止后续 wc -l 和 cat 命令报错
+# 确保成功文件存在，即使为空，防止后续 wc -l 和 cat 命令报错
 touch "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
@@ -108,6 +107,7 @@ TIMEOUT_MS=$((TIMEOUT_SECONDS * 1000))
 tcp_test() {
     local host="$1"
     local port="$2"
+    local abs_success_file="$3" # 接收绝对路径
     local start_time=$(date +%s%N) # 纳秒级开始时间
     local end_time
 
@@ -121,19 +121,19 @@ tcp_test() {
         # 计算毫秒延迟 (ns / 1,000,000)
         local latency_ms=$(( (end_time - start_time) / 1000000 ))
         
-        # 写入成功列表 (HOST PORT LATENCY)
-        # 此处使用绝对路径确保在 xargs 子进程中写入成功
-        echo "$host $port $latency_ms" >> "$TCP_SUCCESS_FILE"
+        # 【关键修复】使用传入的绝对路径写入文件
+        echo "$host $port $latency_ms" >> "$abs_success_file"
         echo "✅ TCP SUCCESS: $host:$port (Latency: ${latency_ms}ms)"
-    # else: 失败或超时，不记录
     fi
 }
 export -f tcp_test
 
 # 使用 xargs -P 进行并行 TCP 测试
-cat "$HOSTS_PORTS_FILE" | xargs -n 2 -P "$PARALLEL_JOBS" bash -c 'tcp_test "$@"' _
+# 传递 $ABS_TCP_SUCCESS_FILE 作为第三个参数
+cat "$HOSTS_PORTS_FILE" | xargs -n 2 -P "$PARALLEL_JOBS" bash -c 'tcp_test "$1" "$2" "'"$ABS_TCP_SUCCESS_FILE"'"' _
 
 # 【修复后的统计和退出逻辑】
+# 重新计算行数，确保读取到最新的写入结果
 TCP_COUNT=$(wc -l < "$TCP_SUCCESS_FILE")
 
 if [ "$TCP_COUNT" -eq 0 ]; then
@@ -144,20 +144,20 @@ if [ "$TCP_COUNT" -eq 0 ]; then
 fi
 echo "--- TCP 测试完成，共 $TCP_COUNT 个节点连通。---"
 
-# --- 4. 执行 UDP 连通性测试 (逻辑不变，但仅对 TCP 成功的节点进行) ---
+# --- 4. 执行 UDP 连通性测试 ---
 echo "--- 开始 UDP 连通性测试 (超时: $TIMEOUT_SECONDS 秒, 并行度: $PARALLEL_JOBS) ---"
 
 # UDP 测试逻辑，现在从 TCP_SUCCESS_FILE 读取 (包含 HOST PORT LATENCY)
-# 只需要 HOST 和 PORT，所以 xargs -n 3 只取前两个参数
 cat "$TCP_SUCCESS_FILE" | xargs -n 3 -P "$PARALLEL_JOBS" bash -c '
     host="$1"
     port="$2"
-    latency="$3" # 保留延迟信息
+    latency="$3"
+    abs_output_file="'"$ABS_OUTPUT_FILE"'" # 获取绝对路径
     
     # UDP 连接测试 (使用 nc -zuv)
     if timeout '"$TIMEOUT_SECONDS"' nc -zuv $host $port 2>/dev/null; then
-        # 写入最终结果文件 (格式: HOST:PORT, 延迟信息丢失，但可后续处理)
-        echo "$host:$port (TCP Latency: ${latency}ms)" >> "'"$OUTPUT_FILE"'"
+        # 【关键修复】使用绝对路径写入最终结果文件
+        echo "$host:$port (TCP Latency: ${latency}ms)" >> "$abs_output_file"
         echo "🎉 DUAL SUCCESS: $host:$port (TCP/UDP 双通, 延迟: ${latency}ms)"
     fi
 ' _
