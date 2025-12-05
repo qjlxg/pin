@@ -3,8 +3,8 @@
 # --- 配置 ---
 # 要测试的远程配置文件链接
 CONFIG_URLS=(
-    "https://github.com/qjlxg/HA/raw/refs/heads/main/merged_configs.txt"
-    "https://github.com/qjlxg/HA/raw/refs/heads/main/link.yaml"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
 )
 # 允许的最大超时时间（秒）
 TIMEOUT_SECONDS=3
