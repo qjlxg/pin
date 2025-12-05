@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- 配置 ---
-# 要测试的远程配置文件链接 (已包含你新增的链接)
+# 要测试的远程配置文件链接
 CONFIG_URLS=(
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
@@ -15,18 +15,18 @@ CONFIG_URLS=(
 TIMEOUT_SECONDS=3
 
 # 临时文件和最终文件
-TEMP_NODES_FILE="temp_raw_nodes.txt"
+TEMP_URI_FILE="temp_raw_uris.txt" # 存储非YAML链接
 HOSTS_PORTS_FILE="temp_hosts_to_test.txt"
 TCP_SUCCESS_FILE="tcp_success_list.txt"
 # 存储 TCP/UDP 双向连通节点的最终文件
 OUTPUT_FILE="working_nodes_full.txt"
 
 # 清理旧文件
-rm -f "$TEMP_NODES_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
+rm -f "$TEMP_URI_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
 
-# --- 1. 下载并初步解析节点 ---
+# --- 1. 下载并初步解析节点 (支持 URI 和 YAML 格式) ---
 for url in "${CONFIG_URLS[@]}"; do
     echo "正在处理链接: $url"
     
@@ -37,25 +37,41 @@ for url in "${CONFIG_URLS[@]}"; do
         continue
     fi
     
-    # 策略: 查找所有包含 "://" 的行，并将其添加到临时文件
-    echo "$config_content" | grep '://' >> "$TEMP_NODES_FILE"
+    # 【新增逻辑】判断是否为 YAML 文件并使用 yq 解析
+    if [[ "$url" =~ \.(yaml|yml)$ ]]; then
+        echo " -> 识别为 YAML 格式，尝试使用 yq 解析..."
+        
+        # 提取 Clash 格式中的 server 和 port (假设结构为 proxies: [...])
+        echo "$config_content" | yq -r '.proxies[] | select(.server != null and .port != null) | "\(.server) \(.port)"' >> "$HOSTS_PORTS_FILE"
+    else
+        # 否则，视为 URI 订阅链接列表，查找包含 "://" 的行
+        echo "$config_content" | grep '://' >> "$TEMP_URI_FILE"
+    fi
+
 done
 
-# 确保临时文件不为空
-if [ ! -s "$TEMP_NODES_FILE" ]; then
-    echo "错误: 未找到任何节点链接。退出。"
+# 确保至少有URI文件或YAML解析结果
+if [ ! -s "$TEMP_URI_FILE" ] && [ ! -s "$HOSTS_PORTS_FILE" ]; then
+    echo "错误: 未找到任何节点链接或解析失败。退出。"
     exit 1
 fi
 
-# --- 2. 提取 IP/Domain 和 Port ---
+# --- 2. 提取 IP/Domain 和 Port (仅处理 URI 文件) ---
 declare -A UNIQUE_HOSTS
-echo "--- 提取唯一的 HOST:PORT ---"
+echo "--- 提取唯一的 HOST:PORT (来自 URI 链接) ---"
+
+# 统计当前从 YAML 解析的 HOST:PORT 数量，用于去重
+while read -r host port; do
+    HOST_PORT_KEY="$host:$port"
+    UNIQUE_HOSTS["$HOST_PORT_KEY"]=1
+done < "$HOSTS_PORTS_FILE"
+
+# 处理 URI 文件 (ss://, vmess://, trojan:// 等)
 while read -r line; do
     host=""
     port=""
     
     # 简单提取 HOST:PORT (适用于Trojan/SS/Vless的非Base64部分)
-    # 查找 @ 符号后的 HOST:PORT
     if [[ "$line" =~ @([0-9a-zA-Z\.\-_]+):([0-9]+)# ]]; then
         host="${BASH_REMATCH[1]}"
         port="${BASH_REMATCH[2]}"
@@ -78,7 +94,7 @@ while read -r line; do
             continue
         fi
         
-        # 将 HOST:PORT 组合存储到关联数组中去重
+        # 将 HOST:PORT 组合存储到关联数组中去重，并追加到测试文件
         HOST_PORT_KEY="$host:$port"
         if [[ -z "${UNIQUE_HOSTS[$HOST_PORT_KEY]}" ]]; then
             UNIQUE_HOSTS["$HOST_PORT_KEY"]=1
@@ -87,11 +103,11 @@ while read -r line; do
     fi
     unset host port
     
-done < "$TEMP_NODES_FILE"
+done < "$TEMP_URI_FILE"
 
 TOTAL_TESTS=${#UNIQUE_HOSTS[@]}
 echo "总共找到并去重 $TOTAL_TESTS 个待测 HOST:PORT 组合。"
-rm -f "$TEMP_NODES_FILE"
+rm -f "$TEMP_URI_FILE"
 
 # --- 3. 执行 TCP 连通性测试 ---
 echo "--- 开始 TCP 连通性测试 ($TIMEOUT_SECONDS 秒超时) ---"
@@ -103,7 +119,6 @@ cat "$HOSTS_PORTS_FILE" | xargs -n 2 -P 8 bash -c '
     
     # TCP 连接测试
     if timeout '"$TIMEOUT_SECONDS"' bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
-        # 成功则保存到临时文件供下一步 UDP 测试
         echo "$host $port" >> "'"$TCP_SUCCESS_FILE"'"
         echo "✅ TCP SUCCESS: $host:$port"
     fi
@@ -127,9 +142,6 @@ cat "$TCP_SUCCESS_FILE" | xargs -n 2 -P 8 bash -c '
     port="$2"
     
     # UDP 连接测试 (使用 nc -zuv)
-    # nc -z: 零输入/输出模式 (只扫描)
-    # nc -u: UDP 模式
-    # 注意：UDP测试只检查端口是否开放并可达
     if timeout '"$TIMEOUT_SECONDS"' nc -zuv $host $port 2>/dev/null; then
         echo "$host:$port" >> "'"$OUTPUT_FILE"'"
         echo "🎉 DUAL SUCCESS: $host:$port (TCP/UDP 双通)"
