@@ -22,6 +22,11 @@ jobs:
   test_and_push:
     runs-on: ubuntu-latest
     
+    # === 关键修复：授予写入权限，解决 403 权限错误 ===
+    permissions:
+      contents: write # 允许 github-actions[bot] 推送新的提交
+    # =================================================
+
     # 设置上海时区
     env:
       TZ: 'Asia/Shanghai'
@@ -43,12 +48,12 @@ jobs:
           # requests 用于下载远程文件
           # pytz 用于处理上海时区
           pip install requests pytz
-          # 注意：ubuntu-latest 默认包含了 'nc' (netcat) 命令
+          # 确保 Netcat (nc) 命令可用，ubuntu-latest 默认包含
           
       - name: 🏃 执行并行连通性测试脚本
         id: run-script
+        # 运行脚本并将输出保存到 run_output.txt，同时打印到控制台
         run: |
-          # 运行脚本并将输出保存到 run_output.txt
           python test_connectivity_parallel.py | tee run_output.txt
           
           # 从脚本输出中提取 REPORT_PATH 变量，供后续步骤使用
@@ -67,6 +72,7 @@ jobs:
             exit 0
           fi
           
+          # 配置 git 用户信息
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           
