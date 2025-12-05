@@ -1,4 +1,4 @@
-name: 🌐 Node Connectivity Test (TCP Ping)
+name: 🌐 Node Dual Connectivity Test (TCP & UDP)
 
 # 配置工作流的触发条件
 on:
@@ -8,7 +8,7 @@ on:
       reason:
         description: '手动运行的原因 (可选)'
         required: false
-        default: 'Manual test run'
+        default: 'Manual dual-test run'
         
   # 2. 定时触发
   schedule:
@@ -20,9 +20,9 @@ on:
     paths:
       # 当工作流文件或脚本本身变动时触发
       - '.github/workflows/connect_test.yml'
-      - 'tcp_ping_test.sh'
+      - 'tcp_udp_test.sh'
 
-# 【关键修复】显式授予 GITHUB_TOKEN 写入权限，以允许提交文件
+# 【权限修复】显式授予 GITHUB_TOKEN 写入权限，以允许提交文件
 permissions:
   contents: write 
 
@@ -31,8 +31,7 @@ env:
   TZ: 'Asia/Shanghai' # 设置时区为上海，用于日志中的时间戳
 
 jobs:
-  run_test:
-    # 在最新的 Ubuntu 环境下运行
+  run_dual_test:
     runs-on: ubuntu-latest
     
     steps:
@@ -40,39 +39,39 @@ jobs:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
         
-      # Step 2: 赋予脚本执行权限
-      - name: ⚙️ Set up Permissions
-        run: chmod +x tcp_ping_test.sh
+      # Step 2: 安装必要的工具 (Netcat 用于 UDP, jq 用于 JSON 解析)
+      - name: 🛠️ Install Netcat and jq
+        run: sudo apt-get update && sudo apt-get install -y netcat jq
         
-      # Step 3: 执行 TCP Ping 测试脚本
-      - name: 🏃 Run TCP Connectivity Test
+      # Step 3: 赋予脚本执行权限
+      - name: ⚙️ Set up Permissions
+        run: chmod +x tcp_udp_test.sh
+        
+      # Step 4: 执行 TCP & UDP 连通性测试脚本
+      - name: 🏃 Run Dual Connectivity Test
         id: test_script
         # 运行脚本，并将输出也写入日志文件
-        run: ./tcp_ping_test.sh | tee script_output.log
+        run: ./tcp_udp_test.sh | tee script_output.log
         
-      # Step 4: 检查是否有新的连通节点文件生成
-      # 注意：在 Bash 环境下，我们使用 $? 来判断上一个命令的成功与否，
-      # 但这里主要是检查文件是否存在且不为空
-      - name: 🔎 Check for Working Nodes
+      # Step 5: 检查是否有新的连通节点文件生成
+      # 检查文件 (working_nodes_full.txt) 是否存在且不为空
+      - name: 🔎 Check for Dual Working Nodes
         id: check_file
         run: |
-          if [ -s working_nodes.txt ]; then
+          if [ -s working_nodes_full.txt ]; then
             echo "::set-output name=file_exists::true"
           else
             echo "::set-output name=file_exists::false"
           fi
           
-      # Step 5: 如果存在连通节点，则提交到仓库
-      # if 条件确保只有在找到连通节点时才执行提交
-      - name: 📤 Commit Working Nodes
+      # Step 6: 如果存在双通节点，则提交到仓库
+      - name: 📤 Commit Dual Working Nodes
         if: steps.check_file.outputs.file_exists == 'true'
         uses: EndBug/add-and-commit@v9
         with:
-          # 使用默认的 GitHub Actions Bot 作为提交者
           author_name: GitHub Actions Bot
           author_email: actions@github.com
-          # 自动生成包含上海时区的提交信息
-          message: "✅ Auto update: Working nodes found [$(date +'%Y-%m-%d %H:%M:%S' -d @$(($(date +%s) + 8*3600)))]"
-          # 添加工作节点列表文件
-          add: 'working_nodes.txt'
-          # 注意：此配置会覆盖原有的 working_nodes.txt 文件
+          # 提交信息使用上海时区时间
+          message: "✅ Auto update: TCP/UDP Dual working nodes found [$(date +'%Y-%m-%d %H:%M:%S' -d @$(($(date +%s) + 8*3600)))]"
+          # 提交双通节点列表文件
+          add: 'working_nodes_full.txt'
