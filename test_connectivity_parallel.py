@@ -11,8 +11,13 @@ import requests
 
 # 远程配置文件链接
 REMOTE_CONFIG_URLS = [
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt",
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml",
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
+    "https://raw.githubusercontent.com/qjlxg/aggregator/refs/heads/main/data/clash.yaml"
+    "https://raw.githubusercontent.com/qjlxg/aggregator/refs/heads/main/data/520.yaml"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/all_unique_nodes.txt"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/link.yaml"
+    "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt"
 ]
 
 # 最大并行工作线程数
