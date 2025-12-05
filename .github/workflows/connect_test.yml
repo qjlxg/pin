@@ -39,9 +39,10 @@ jobs:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
         
-      # Step 2: 安装必要的工具 (Netcat 用于 UDP, jq 用于 JSON 解析)
+      # Step 2: 安装必要的工具 (Netcat-openbsd 用于 UDP, jq 用于 JSON 解析)
       - name: 🛠️ Install Netcat and jq
-        run: sudo apt-get update && sudo apt-get install -y netcat jq
+        # 【此处已修复】将 netcat 替换为 netcat-openbsd 以解决找不到包的问题
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd jq
         
       # Step 3: 赋予脚本执行权限
       - name: ⚙️ Set up Permissions
