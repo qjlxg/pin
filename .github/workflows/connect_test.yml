@@ -20,8 +20,8 @@ on:
     paths:
       # 当工作流文件或脚本本身变动时触发
       - '.github/workflows/connect_test.yml'
-      - 'tcp_udp_test.sh'
-
+      - 'tcp_udp_test.sh' # 脚本名
+      
 # 【权限修复】显式授予 GITHUB_TOKEN 写入权限，以允许提交文件
 permissions:
   contents: write 
@@ -39,10 +39,10 @@ jobs:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
         
-      # Step 2: 安装必要的工具 (Netcat-openbsd 用于 UDP, jq 用于 JSON 解析)
-      - name: 🛠️ Install Netcat and jq
-        # 【此处已修复】将 netcat 替换为 netcat-openbsd 以解决找不到包的问题
-        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd jq
+      # Step 2: 安装必要的工具 (Netcat-openbsd 用于 UDP, jq 用于 JSON 解析, yq 用于 YAML 解析)
+      - name: 🛠️ Install Netcat, jq, and yq
+        # 确保安装了 netcat-openbsd (修复了 netcat 虚拟包问题)、jq 和 yq
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd jq yq
         
       # Step 3: 赋予脚本执行权限
       - name: ⚙️ Set up Permissions
@@ -58,6 +58,7 @@ jobs:
       # 检查文件 (working_nodes_full.txt) 是否存在且不为空
       - name: 🔎 Check for Dual Working Nodes
         id: check_file
+        # 注意：此处使用 ::set-output 是 Actions v3 以前的写法，但在此环境中仍可兼容。
         run: |
           if [ -s working_nodes_full.txt ]; then
             echo "::set-output name=file_exists::true"
