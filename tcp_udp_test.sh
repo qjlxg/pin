@@ -7,7 +7,7 @@ CONFIG_URLS=(
    
 )
 # 减少超时时间为 1 秒，加快失败节点的跳过速度
-TIMEOUT_SECONDS=1
+TIMEOUT_SECONDS=3
 # 提高并行度到 32
 PARALLEL_JOBS=32
 
