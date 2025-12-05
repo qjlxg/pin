@@ -1,86 +1,203 @@
-#!/bin/bash
+# test_connectivity_parallel.py
+import os
+import sys
+import datetime
+import pytz
+import re
+import base64
+from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import requests
 
-# 设置时区为上海
-export TZ='Asia/Shanghai'
-
-# 配置文件链接 (脚本将直接从这些链接下载最新内容)
-CONFIG_URLS=(
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
+# 远程配置文件链接
+REMOTE_CONFIG_URLS = [
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt",
    
-)
+]
 
-# 临时文件
-TEMP_NODES_FILE=$(mktemp)
-SUCCESS_NODES_FILE=$(mktemp)
-
-# 1. 下载并合并节点信息
-echo "--- 正在下载配置文件 ---"
-for url in "${CONFIG_URLS[@]}"; do
-    echo "下载: $url"
-    # 使用 curl -sL 下载内容
-    curl -sL "$url" >> "$TEMP_NODES_FILE"
-done
-
-# 2. 解析和测试节点连通性
-echo "--- 正在解析和测试节点连通性 (使用 nc 检查端口开放性) ---"
-# 注意: 以下解析逻辑针对常见代理链接格式进行简化提取，可能不适用于所有情况。
-grep -vE '^\s*$' "$TEMP_NODES_FILE" | while IFS= read -r line; do
-    HOST=""
-    PORT=""
-
-    # 尝试提取 @HOST:PORT 部分
-    if [[ "$line" =~ @([0-9a-zA-Z\.\-]+):([0-9]+) ]]; then
-        HOST="${BASH_REMATCH[1]}"
-        PORT="${BASH_REMATCH[2]}"
-    # 尝试提取 PROTOCOL://HOST:PORT/... 部分
-    elif [[ "$line" =~ ://([0-9a-zA-Z\.\-]+):([0-9]+) ]]; then
-        HOST="${BASH_REMATCH[1]}"
-        PORT="${BASH_REMATCH[2]}"
-    fi
-
-    if [ -n "$HOST" ] && [ -n "$PORT" ]; then
-        echo "测试节点: $HOST:$PORT"
-        # 使用 nc -z -w 2 检查端口连通性 (TCP SYN check, 2秒超时)
-        if nc -z -w 2 "$HOST" "$PORT" &> /dev/null; then
-            echo "  ✅ 成功: $HOST:$PORT"
-            # 记录原始的成功节点链接
-            echo "$line" >> "$SUCCESS_NODES_FILE"
-        else
-            echo "  ❌ 失败: $HOST:$PORT"
-        fi
-    # else
-    #     echo "  ⚠️ 警告: 无法从链接中解析主机和端口。跳过: $line"
-    fi
-done
-
-# 3. 生成报告目录和文件名 (上海时区)
-TIMESTAMP=$(date +'%Y-%m-%d-%H-%M-%S')
-OUTPUT_DIR=$(date +'%Y/%m')
-OUTPUT_PATH="$OUTPUT_DIR/$TIMESTAMP-success-nodes.txt"
-
-# 4. 创建目录并保存结果
-if [ -s "$SUCCESS_NODES_FILE" ]; then
-    echo "--- 保存成功节点到报告文件 ---"
-    mkdir -p "$OUTPUT_DIR"
+def fetch_and_parse_nodes():
+    """
+    下载远程文件，并解析出潜在的节点链接。
+    """
+    print("--- 1. 正在获取和解析所有节点 ---")
     
-    # 写入报告头
-    echo "# 节点连通性测试成功结果" > "$OUTPUT_PATH"
-    echo "---" >> "$OUTPUT_PATH"
-    echo "测试时间 (上海): $(date +'%Y-%m-%d %H:%M:%S')" >> "$OUTPUT_PATH"
-    echo "---" >> "$OUTPUT_PATH"
+    all_content = []
     
-    # 写入成功的节点链接
-    cat "$SUCCESS_NODES_FILE" >> "$OUTPUT_PATH"
+    # 下载远程文件
+    for url in REMOTE_CONFIG_URLS:
+        try:
+            print(f"下载: {url}")
+            # 设置 15 秒超时
+            response = requests.get(url, timeout=15)
+            response.raise_for_status() # 检查 HTTP 错误
+            all_content.append(response.text)
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ 警告: 下载 {url} 失败: {e}", file=sys.stderr)
+
+    # 合并内容并按行分割
+    all_lines = "\n".join(all_content).split('\n')
     
-    echo "✅ 报告已生成: $OUTPUT_PATH"
-else
-    echo "⚠️ 没有节点测试成功。不生成报告文件。"
-fi
+    # 筛选非空且非注释的行，并去重
+    unique_nodes = set(line.strip() for line in all_lines if line.strip() and not line.strip().startswith('#'))
+    
+    print(f"共发现 {len(unique_nodes)} 个潜在节点。")
+    return list(unique_nodes)
 
-# 5. 清理临时文件
-rm "$TEMP_NODES_FILE" "$SUCCESS_NODES_FILE"
 
-# 6. 输出报告路径供 Actions 使用
-if [ -f "$OUTPUT_PATH" ]; then
-    echo "REPORT_PATH=$OUTPUT_PATH"
-fi
+def extract_host_port(node_link):
+    """
+    尝试从节点链接中解析出 Host 和 Port。
+    使用正则表达式和 Base64 解码，以应对 Vmess/Shadowsocks 等格式。
+    """
+    
+    # 1. 尝试匹配常见的 base64 编码
+    match_b64 = re.search(r'//([a-zA-Z0-9+/=]+)', node_link)
+    if match_b64:
+        try:
+            # 尝试 Base64 解码
+            # 自动添加填充符 '==' 或 '='
+            decoded_data = match_b64.group(1)
+            padding_needed = 4 - (len(decoded_data) % 4)
+            if padding_needed < 4:
+                decoded_data += '=' * padding_needed
+                
+            decoded = base64.b64decode(decoded_data).decode('utf-8', 'ignore')
+            
+            # 尝试从 JSON (如 Vmess) 中提取 "add" 和 "port"
+            match_json = re.search(r'"add"\s*:\s*"(.*?)",\s*"port"\s*:\s*"(.*?)"', decoded)
+            if match_json:
+                return match_json.group(1), match_json.group(2)
+            
+            # 尝试从URL格式中提取 host:port (如 SS)
+            match_url = re.search(r'^(.*?)@([0-9a-zA-Z\.\-]+):([0-9]+)', decoded)
+            if match_url:
+                return match_url.group(2), match_url.group(3)
+                
+        except:
+            pass
+    
+    # 2. 尝试匹配非编码的 host:port (如 VLESS/Trojan 或某些 SS)
+    # 查找 IPv4/域名:端口的模式
+    match_plain = re.search(r'([0-9a-zA-Z\.\-]+):([0-9]+)', node_link)
+    if match_plain:
+        # 排除可能是 base64 编码内部的匹配，取最后一个匹配
+        return match_plain.groups()[-2], match_plain.groups()[-1]
+        
+    return None, None
+
+
+def test_connectivity(node_link):
+    """
+    使用 nc (Netcat) 命令检查 TCP 端口是否开放。
+    这是最简单的连通性测试。
+    """
+    host, port = extract_host_port(node_link)
+    
+    if not host or not port:
+        return False, node_link, f"无法解析主机/端口。原始链接片段: {node_link[:50]}..."
+
+    try:
+        # 使用 Netcat (nc) 检查端口连通性，超时 3 秒
+        # -z: 零I/O模式 (扫描)
+        # -w 3: 3秒超时
+        result = subprocess.run(
+            ['nc', '-z', '-w', '3', host, port], 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return True, node_link, f"✅ TCP端口开放: {host}:{port}"
+        else:
+            return False, node_link, f"❌ TCP端口关闭或超时: {host}:{port}"
+
+    except Exception as e:
+        return False, node_link, f"测试时发生内部错误: {e}"
+
+
+def run_tests_parallel(all_nodes):
+    """
+    使用线程池并行运行测试。
+    """
+    print("--- 2. 正在并行测试节点 ---")
+    results = []
+    
+    # 设置最大线程数，提高并行度
+    MAX_WORKERS = 32 
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 提交所有任务到线程池
+        future_to_node = {executor.submit(test_connectivity, node): node for node in all_nodes}
+        
+        # 迭代已完成的任务并收集结果
+        for i, future in enumerate(future_to_node):
+            try:
+                # status: True/False, link: 原始链接, message: 结果消息
+                status, link, message = future.result()
+                results.append((status, link))
+                print(f"[{i+1}/{len(all_nodes)}] {'SUCCESS' if status else 'FAIL'}: {message}")
+            except Exception as exc:
+                print(f"[{i+1}/{len(all_nodes)}] ❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
+                
+    return results
+
+
+def save_results(results):
+    """
+    生成并保存成功的节点链接到带时间戳的文件。
+    """
+    shanghai_tz = pytz.timezone('Asia/Shanghai')
+    now_shanghai = datetime.datetime.now(shanghai_tz)
+    
+    # 目录格式: YYYY/MM/
+    output_dir = now_shanghai.strftime('%Y/%m')
+    
+    # 文件名格式: YYYY-MM-DD-HH-MM-SS-success-nodes.txt
+    output_filename = now_shanghai.strftime('%Y-%m-%d-%H-%M-%S') + '-success-nodes.txt'
+    output_path = os.path.join(output_dir, output_filename)
+
+    # 筛选成功的节点
+    successful_nodes = [link for status, link in results if status]
+    
+    print("--- 3. 正在生成报告 ---")
+    
+    if not successful_nodes:
+        print("⚠️ 没有节点测试成功。不生成报告文件。")
+        return None
+
+    # 创建目录
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 写入报告
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write("# 节点连通性测试成功结果\n")
+        f.write(f"测试时间 (上海): {now_shanghai.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"总节点数: {len(results)}\n")
+        f.write(f"成功连接数: {len(successful_nodes)}\n")
+        f.write("---\n")
+        
+        # 仅保存原始节点链接，每行一个
+        for link in successful_nodes:
+            f.write(f"{link}\n")
+
+    print(f"✅ 测试完成。成功节点列表已保存到: {output_path}")
+    return output_path
+
+if __name__ == "__main__":
+    
+    # 1. 获取所有节点
+    all_nodes = fetch_and_parse_nodes()
+    
+    if not all_nodes:
+        sys.exit(0)
+        
+    # 2. 并行测试
+    results = run_tests_parallel(all_nodes)
+    
+    # 3. 保存结果
+    final_path = save_results(results)
+    
+    # 4. 传回输出文件名供 GitHub Actions 使用
+    if final_path:
+        # 输出 REPORT_PATH 变量，供 Actions 捕获
+        print(f"REPORT_PATH={final_path}")
