@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- 配置 ---
-# 要测试的远程配置文件链接
+# 要测试的远程配置文件链接 (已包含你新增的链接)
 CONFIG_URLS=(
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
@@ -13,14 +13,16 @@ CONFIG_URLS=(
 )
 # 允许的最大超时时间（秒）
 TIMEOUT_SECONDS=3
-# 存储连通节点的最终文件
-OUTPUT_FILE="working_nodes.txt"
-# 临时文件
-TEMP_NODES_FILE="temp_nodes.txt"
+
+# 临时文件和最终文件
+TEMP_NODES_FILE="temp_raw_nodes.txt"
+HOSTS_PORTS_FILE="temp_hosts_to_test.txt"
+TCP_SUCCESS_FILE="tcp_success_list.txt"
+# 存储 TCP/UDP 双向连通节点的最终文件
+OUTPUT_FILE="working_nodes_full.txt"
 
 # 清理旧文件
-> "$TEMP_NODES_FILE"
-> "$OUTPUT_FILE"
+rm -f "$TEMP_NODES_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
 
@@ -35,7 +37,6 @@ for url in "${CONFIG_URLS[@]}"; do
         continue
     fi
     
-    # 尝试解析 Vmess/Shadowsocks/Trojan/Vless/Hysteria/Tuic 等链接
     # 策略: 查找所有包含 "://" 的行，并将其添加到临时文件
     echo "$config_content" | grep '://' >> "$TEMP_NODES_FILE"
 done
@@ -47,20 +48,11 @@ if [ ! -s "$TEMP_NODES_FILE" ]; then
 fi
 
 # --- 2. 提取 IP/Domain 和 Port ---
-# Vmess/SS/Vless/Trojan 等链接的地址和端口通常是BASE64编码或位于协议头之后
-# 这个脚本将尝试从常见格式中提取 HOST:PORT
-# 注意: Base64 解码后的复杂 JSON 结构需要更复杂的解析，这里只做基本处理
-
-# 创建一个集合来存储唯一的 HOST:PORT 组合
 declare -A UNIQUE_HOSTS
-HOSTS_PORTS_FILE="hosts_to_test.txt"
-> "$HOSTS_PORTS_FILE"
-
 echo "--- 提取唯一的 HOST:PORT ---"
 while read -r line; do
-    # 1. 解码 Base64 部分 (适用于 Vmess, Trojan, 部分 SS)
-    # 提取 "://" 到 "@" 之间的 Base64 或原始内容
-    # 注意：这里的正则匹配很困难，仅做尝试性提取
+    host=""
+    port=""
     
     # 简单提取 HOST:PORT (适用于Trojan/SS/Vless的非Base64部分)
     # 查找 @ 符号后的 HOST:PORT
@@ -71,7 +63,7 @@ while read -r line; do
     # 尝试处理 Vmess/Vless (查找 base64 后的内容)
     elif [[ "$line" =~ ://([a-zA-Z0-9+/=]+) ]]; then
         base64_part="${BASH_REMATCH[1]}"
-        # 尝试解码并提取 address 和 port (需要 jq，但 GitHub Actions 默认有)
+        # 尝试解码并提取 address 和 port (需要 jq)
         decoded_json=$(echo "$base64_part" | base64 -d 2>/dev/null)
         if echo "$decoded_json" | jq -e '.add' &>/dev/null; then
              host=$(echo "$decoded_json" | jq -r '.add')
@@ -81,7 +73,7 @@ while read -r line; do
 
     # 进一步清理，如果提取成功
     if [[ -n "$host" && -n "$port" ]]; then
-        # 排除私有 IP 范围，除非您确定要测试内部网络
+        # 排除私有 IP 范围
         if [[ "$host" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.) ]]; then
             continue
         fi
@@ -93,59 +85,64 @@ while read -r line; do
             echo "$host $port" >> "$HOSTS_PORTS_FILE"
         fi
     fi
-    # 清理变量
     unset host port
     
 done < "$TEMP_NODES_FILE"
 
-echo "总共找到并去重 ${#UNIQUE_HOSTS[@]} 个待测 HOST:PORT 组合。"
+TOTAL_TESTS=${#UNIQUE_HOSTS[@]}
+echo "总共找到并去重 $TOTAL_TESTS 个待测 HOST:PORT 组合。"
 rm -f "$TEMP_NODES_FILE"
 
-# --- 3. 执行 TCP Ping 测试 ---
-
+# --- 3. 执行 TCP 连通性测试 ---
 echo "--- 开始 TCP 连通性测试 ($TIMEOUT_SECONDS 秒超时) ---"
-TOTAL_TESTS=${#UNIQUE_HOSTS[@]}
-TEST_COUNT=0
 
-# 使用 xargs 进行并行测试
-# -P 8: 设置并行度为 8
-# -I {}: 将每一行作为输入替换 {}
+# 使用 xargs -P 8 进行并行 TCP 测试
 cat "$HOSTS_PORTS_FILE" | xargs -n 2 -P 8 bash -c '
     host="$1"
     port="$2"
     
-    # 记录开始时间
-    START_TIME=$(date +%s%N)
-    
-    # 使用 bash 的 /dev/tcp 进行 TCP 连接尝试 (比 netcat 更常用且更轻量)
-    # 配合 timeout 来限制时间
+    # TCP 连接测试
     if timeout '"$TIMEOUT_SECONDS"' bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
-        # 记录结束时间
-        END_TIME=$(date +%s%N)
-        
-        # 计算延迟 (ms)
-        LATENCY_MS=$(echo "scale=2; ($END_TIME - $START_TIME) / 1000000" | bc)
-        
-        echo "✅ SUCCESS: $host:$port (延迟: ${LATENCY_MS}ms)"
-        echo "$host:$port" >> "'"$OUTPUT_FILE"'"
-    else
-        # 失败不输出，保持日志整洁
-        :
+        # 成功则保存到临时文件供下一步 UDP 测试
+        echo "$host $port" >> "'"$TCP_SUCCESS_FILE"'"
+        echo "✅ TCP SUCCESS: $host:$port"
     fi
 ' _
 
-# --- 4. 结果总结 ---
-WORKING_COUNT=$(wc -l < "$OUTPUT_FILE")
+TCP_COUNT=$(wc -l < "$TCP_SUCCESS_FILE")
+if [ "$TCP_COUNT" -eq 0 ]; then
+    echo "---"
+    echo "警告: 未找到 TCP 连通的节点，跳过 UDP 测试。"
+    rm -f "$HOSTS_PORTS_FILE"
+    exit 0
+fi
+echo "--- TCP 测试完成，共 $TCP_COUNT 个节点连通。---"
+
+# --- 4. 执行 UDP 连通性测试 (仅针对 TCP 成功的节点) ---
+echo "--- 开始 UDP 连通性测试 ($TIMEOUT_SECONDS 秒超时) ---"
+
+# 使用 xargs -P 8 进行并行 UDP 测试
+cat "$TCP_SUCCESS_FILE" | xargs -n 2 -P 8 bash -c '
+    host="$1"
+    port="$2"
+    
+    # UDP 连接测试 (使用 nc -zuv)
+    # nc -z: 零输入/输出模式 (只扫描)
+    # nc -u: UDP 模式
+    # 注意：UDP测试只检查端口是否开放并可达
+    if timeout '"$TIMEOUT_SECONDS"' nc -zuv $host $port 2>/dev/null; then
+        echo "$host:$port" >> "'"$OUTPUT_FILE"'"
+        echo "🎉 DUAL SUCCESS: $host:$port (TCP/UDP 双通)"
+    fi
+' _
+
+# --- 5. 结果总结 ---
+DUAL_SUCCESS_COUNT=$(wc -l < "$OUTPUT_FILE")
 echo "---"
 echo "✅ 测试完成!"
 echo "总共测试了 $TOTAL_TESTS 个节点。"
-echo "其中 $WORKING_COUNT 个节点端口是连通的。"
+echo "其中 $TCP_COUNT 个节点 TCP 连通。"
+echo "最终 $DUAL_SUCCESS_COUNT 个节点 TCP 和 UDP 双向连通，结果已保存到 $OUTPUT_FILE"
 
-# 提交结果文件 (GitHub Actions 后续步骤将处理 Git 提交)
-if [ "$WORKING_COUNT" -gt 0 ]; then
-    echo "连通的节点列表已保存到 $OUTPUT_FILE"
-else
-    echo "未找到连通的节点，不创建或更新 $OUTPUT_FILE。"
-fi
-
-rm -f "$HOSTS_PORTS_FILE"
+# 清理临时文件
+rm -f "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE"
