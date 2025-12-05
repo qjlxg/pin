@@ -1,19 +1,22 @@
-# .github/workflows/connectivity-test-simple.yml
-name: 节点连通性测试 (简化版)
+# .github/workflows/connectivity-test-parallel.yml
+name: 节点连通性测试 (并行加速)
 
 on:
   # 1. 允许手动运行
   workflow_dispatch:
-  
+    inputs:
+      reason:
+        description: '手动运行的原因 (可选)'
+        required: false
+        default: 'Manual trigger'
+        
   # 2. 脚本变动时自动触发
   push:
     branches:
       - main # 请根据您的主分支名称进行修改
     paths:
-      - 'test_connectivity.sh'
-      - '.github/workflows/connectivity-test-simple.yml'
-      # 如果您将远程的 merged_configs.txt 和 config.yaml 也下载到本地仓库了，
-      # 可以将它们的本地路径也加入到 paths 列表中，以便变动时触发。
+      - 'test_connectivity_parallel.py'
+      - '.github/workflows/connectivity-test-parallel.yml'
       
 jobs:
   test_and_push:
@@ -27,42 +30,55 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 允许后续步骤推送新的提交
+          # 允许后续步骤推送新的提交
+          fetch-depth: 0 
           
-      - name: 🏃 执行连通性测试脚本
-        id: run-script
-        # 确保脚本有执行权限
-        # 运行脚本并将输出（包括 REPORT_PATH）捕获到 run_output.txt
+      - name: 🐍 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: ⚙️ 安装依赖 (requests, pytz)
         run: |
-          chmod +x test_connectivity.sh
-          ./test_connectivity.sh | tee run_output.txt
+          # requests 用于下载远程文件
+          # pytz 用于处理上海时区
+          pip install requests pytz
+          # 注意：ubuntu-latest 默认包含了 'nc' (netcat) 命令
+          
+      - name: 🏃 执行并行连通性测试脚本
+        id: run-script
+        run: |
+          # 运行脚本并将输出保存到 run_output.txt
+          python test_connectivity_parallel.py | tee run_output.txt
           
           # 从脚本输出中提取 REPORT_PATH 变量，供后续步骤使用
           REPORT_PATH=$(grep 'REPORT_PATH=' run_output.txt | cut -d'=' -f2)
           echo "REPORT_PATH=$REPORT_PATH" >> $GITHUB_OUTPUT
         
       - name: ⬆️ 推送测试结果到仓库
-        # 只有当脚本输出了 REPORT_PATH 并且文件存在时才执行
-        if: steps.run-script.outputs.REPORT_PATH != '' && steps.run-script.outputs.REPORT_PATH != null
+        # 只有脚本成功输出了 REPORT_PATH 才会执行后续步骤
+        if: steps.run-script.outputs.REPORT_PATH != ''
         run: |
           REPORT_PATH=${{ steps.run-script.outputs.REPORT_PATH }}
           
-          if [ -f "$REPORT_PATH" ]; then
-            git config user.name 'github-actions[bot]'
-            git config user.email 'github-actions[bot]@users.noreply.github.com'
-            
-            # 添加入新生成的报告文件
-            git add $REPORT_PATH
-            
-            # 检查是否有需要提交的更改
-            if ! git diff-index --quiet HEAD; then
-              DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
-              git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (上海时区)"
-              git push
-              echo "✅ 成功推送了新报告: $REPORT_PATH"
-            else
-              echo "⚠️ 仓库中没有需要提交的更改。"
-            fi
-          else
+          # 检查报告文件是否存在
+          if [ ! -f "$REPORT_PATH" ]; then
             echo "❌ 报告文件未找到，跳过推送。"
+            exit 0
+          fi
+          
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # 添加入新生成的报告文件及其所在的年月目录
+          git add $REPORT_PATH
+          
+          # 检查是否有需要提交的更改
+          if ! git diff-index --quiet HEAD; then
+            DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
+            git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (上海时区)"
+            git push
+            echo "✅ 成功推送了新报告: $REPORT_PATH"
+          else
+            echo "⚠️ 仓库中没有需要提交的更改。"
           fi
