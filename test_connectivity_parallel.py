@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终版本)
+# test_connectivity_parallel.py (已修复 YAML 解析问题)
 import os
 import sys
 import datetime
@@ -19,6 +19,7 @@ REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/link.yaml",
     "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt",
 ]
+
 # 最大并行工作线程数
 MAX_WORKERS = 32
 
@@ -50,25 +51,25 @@ def fetch_and_parse_nodes():
         if not stripped_line or stripped_line.startswith('#'):
             continue
             
-        if len(stripped_line) < 10 or \
-           re.search(r'[\u4e00-\u9fff]', stripped_line) or \
+        # 排除明显是噪音的行 (过滤条件不变，但现在 YAML 行可以顺利通过)
+        if re.search(r'[\u4e00-\u9fff]', stripped_line) or \
            re.search(r'\d{1,2}:\d{2}', stripped_line) or \
            re.search(r'(play\.google\.com|github\.com|K)', stripped_line, re.IGNORECASE):
            continue
         
-        # 检查是否包含 URL 协议头或 host:port 结构
+        # 检查是否包含 URL 协议头、IP:Port 结构或 YAML 结构
         is_link = re.search(r'(://|@|\b(vmess|ss|trojan|vless)\b)', stripped_line, re.IGNORECASE)
         is_host_port = re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:[0-9]{2,5}\b', stripped_line)
+        is_yaml = re.search(r'server\s*:', stripped_line, re.IGNORECASE)
 
-        if is_link or is_host_port:
+        if is_link or is_host_port or is_yaml:
             unique_nodes.add(stripped_line)
 
     # 第二次处理：修复重复协议前缀
     cleaned_nodes = set()
     for node in unique_nodes:
-        # 修复用户指定的 ss://ss:// 错误
+        # 修复 ss://ss:// 等重复协议前缀错误
         cleaned_node = node.replace("ss://ss://", "ss://")
-        # 顺便修复其他可能存在的重复错误
         cleaned_node = cleaned_node.replace("vmess://vmess://", "vmess://")
         cleaned_node = cleaned_node.replace("vless://vless://", "vless://")
         
@@ -81,7 +82,9 @@ def fetch_and_parse_nodes():
 def extract_host_port(node_link):
     """
     尝试从节点链接中解析出 Host 和 Port。
+    *** 新增对 YAML 格式的解析支持 ***
     """
+    
     # 1. 尝试匹配常见的 base64 编码
     match_b64 = re.search(r'//([a-zA-Z0-9+/=]+)', node_link)
     if match_b64:
@@ -104,7 +107,13 @@ def extract_host_port(node_link):
         except:
             pass
     
-    # 2. 尝试匹配非编码的 host:port (VLESS/Trojan/非编码SS)
+    # 2. 尝试匹配 YAML 格式: server: 'host', port: 'port'
+    # 匹配 server: 后面的值和 port: 后面的值，支持单引号、双引号或无引号
+    match_yaml = re.search(r"server\s*:\s*['\"]?([0-9a-zA-Z\.\-]+)['\"]?,\s*port\s*:\s*['\"]?([0-9]+)['\"]?", node_link)
+    if match_yaml:
+        return match_yaml.group(1), match_yaml.group(2)
+        
+    # 3. 尝试匹配非编码的 host:port (VLESS/Trojan/非编码SS)
     match_plain = re.search(r'([0-9a-zA-Z\.\-]+):([0-9]+)', node_link)
     if match_plain:
         return match_plain.groups()[-2], match_plain.groups()[-1]
@@ -168,7 +177,7 @@ def save_results(results):
     # 目录格式: YYYY/MM/
     output_dir = now_shanghai.strftime('%Y/%m')
     
-    # === 移除文件名中的时间戳 ===
+    # 文件名: success-nodes.txt (无时间戳)
     output_filename = 'success-nodes.txt' 
     output_path = os.path.join(output_dir, output_filename)
 
