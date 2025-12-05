@@ -4,6 +4,7 @@
 # 要测试的远程配置文件链接
 CONFIG_URLS=(
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt"
+    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml"
 )
 # 减少超时时间为 3 秒
 TIMEOUT_SECONDS=3
@@ -40,8 +41,8 @@ check_dependency "nc" "netcat/nc (用于 UDP 测试，例如: sudo apt install n
 # 清理旧文件
 rm -f "$TEMP_URI_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
-# 确保成功文件存在，即使为空，防止后续 wc -l 和 cat 命令报错
-touch "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
+# 【修复】确保所有后续要读取的文件都存在，即使是空的
+touch "$TCP_SUCCESS_FILE" "$OUTPUT_FILE" "$HOSTS_PORTS_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
 
