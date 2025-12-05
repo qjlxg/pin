@@ -1,15 +1,10 @@
 # .github/workflows/connectivity-test-parallel.yml
-name: 节点连通性测试 (并行加速)
+name: 测试 (并行加速)
 
 on:
-  # 1. 允许手动运行
+  # 1. 允许手动运行 (已去除原因输入)
   workflow_dispatch:
-    inputs:
-      reason:
-        description: '手动运行的原因 (可选)'
-        required: false
-        default: 'Manual trigger'
-        
+  
   # 2. 脚本变动时自动触发
   push:
     branches:
@@ -22,11 +17,10 @@ jobs:
   test_and_push:
     runs-on: ubuntu-latest
     
-    # === 关键修复：授予写入权限，解决 403 权限错误 ===
+    # 授予写入权限，解决 403 权限错误
     permissions:
       contents: write # 允许 github-actions[bot] 推送新的提交
-    # =================================================
-
+    
     # 设置上海时区
     env:
       TZ: 'Asia/Shanghai'
@@ -58,6 +52,8 @@ jobs:
           
           # 从脚本输出中提取 REPORT_PATH 变量，供后续步骤使用
           REPORT_PATH=$(grep 'REPORT_PATH=' run_output.txt | cut -d'=' -f2)
+          # 注意：GitHub Actions 环境中，对于非 setup-python 等特殊 action，
+          # 推荐使用 echo "VAR=VALUE" >> $GITHUB_OUTPUT 方式来设置输出变量。
           echo "REPORT_PATH=$REPORT_PATH" >> $GITHUB_OUTPUT
         
       - name: ⬆️ 推送测试结果到仓库
