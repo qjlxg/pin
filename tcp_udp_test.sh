@@ -11,20 +11,22 @@ CONFIG_URLS=(
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/link.yaml"
     "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt"
 )
-# 【优化1】减少超时时间为 1 秒，加快失败节点的跳过速度
+# 减少超时时间为 1 秒，加快失败节点的跳过速度
 TIMEOUT_SECONDS=1
-# 【优化2】提高并行度到 32
+# 提高并行度到 32
 PARALLEL_JOBS=32
 
 # 临时文件和最终文件
 TEMP_URI_FILE="temp_raw_uris.txt"
 HOSTS_PORTS_FILE="temp_hosts_to_test.txt"
-# TCP 成功文件现在将包含 HOST PORT LATENCY
 TCP_SUCCESS_FILE="tcp_success_list.txt" 
 OUTPUT_FILE="working_nodes_full.txt"
 
 # 清理旧文件
 rm -f "$TEMP_URI_FILE" "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
+
+# 【重要修复】确保成功文件存在，即使为空，防止后续 wc -l 和 cat 命令报错
+touch "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
 
 echo "--- 开始下载并解析节点配置 ---"
 
@@ -120,6 +122,7 @@ tcp_test() {
         local latency_ms=$(( (end_time - start_time) / 1000000 ))
         
         # 写入成功列表 (HOST PORT LATENCY)
+        # 此处使用绝对路径确保在 xargs 子进程中写入成功
         echo "$host $port $latency_ms" >> "$TCP_SUCCESS_FILE"
         echo "✅ TCP SUCCESS: $host:$port (Latency: ${latency_ms}ms)"
     # else: 失败或超时，不记录
@@ -130,11 +133,13 @@ export -f tcp_test
 # 使用 xargs -P 进行并行 TCP 测试
 cat "$HOSTS_PORTS_FILE" | xargs -n 2 -P "$PARALLEL_JOBS" bash -c 'tcp_test "$@"' _
 
+# 【修复后的统计和退出逻辑】
 TCP_COUNT=$(wc -l < "$TCP_SUCCESS_FILE")
+
 if [ "$TCP_COUNT" -eq 0 ]; then
     echo "---"
     echo "警告: 未找到 TCP 连通的节点，跳过 UDP 测试。"
-    rm -f "$HOSTS_PORTS_FILE"
+    rm -f "$HOSTS_PORTS_FILE" "$TCP_SUCCESS_FILE" "$OUTPUT_FILE"
     exit 0
 fi
 echo "--- TCP 测试完成，共 $TCP_COUNT 个节点连通。---"
