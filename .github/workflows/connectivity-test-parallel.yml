@@ -2,7 +2,7 @@
 name: 测试 (并行加速)
 
 on:
-  # 1. 允许手动运行 (已去除原因输入)
+  # 1. 允许手动运行 (无输入参数)
   workflow_dispatch:
   
   # 2. 脚本变动时自动触发
@@ -39,46 +39,43 @@ jobs:
 
       - name: ⚙️ 安装依赖 (requests, pytz)
         run: |
-          # requests 用于下载远程文件
-          # pytz 用于处理上海时区
           pip install requests pytz
-          # 确保 Netcat (nc) 命令可用，ubuntu-latest 默认包含
           
       - name: 🏃 执行并行连通性测试脚本
         id: run-script
-        # 运行脚本并将输出保存到 run_output.txt，同时打印到控制台
         run: |
+          # 运行脚本
           python test_connectivity_parallel.py | tee run_output.txt
           
-          # 从脚本输出中提取 REPORT_PATH 变量，供后续步骤使用
+          # 从脚本输出中提取 REPORT_PATH 变量
           REPORT_PATH=$(grep 'REPORT_PATH=' run_output.txt | cut -d'=' -f2)
-          # 注意：GitHub Actions 环境中，对于非 setup-python 等特殊 action，
-          # 推荐使用 echo "VAR=VALUE" >> $GITHUB_OUTPUT 方式来设置输出变量。
           echo "REPORT_PATH=$REPORT_PATH" >> $GITHUB_OUTPUT
         
-      - name: ⬆️ 推送测试结果到仓库
-        # 只有脚本成功输出了 REPORT_PATH 才会执行后续步骤
+      - name: ⬆️ 推送测试结果到仓库 (已修复冲突问题)
         if: steps.run-script.outputs.REPORT_PATH != ''
         run: |
           REPORT_PATH=${{ steps.run-script.outputs.REPORT_PATH }}
           
-          # 检查报告文件是否存在
           if [ ! -f "$REPORT_PATH" ]; then
             echo "❌ 报告文件未找到，跳过推送。"
             exit 0
           fi
           
-          # 配置 git 用户信息
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # 添加入新生成的报告文件及其所在的年月目录
           git add $REPORT_PATH
           
-          # 检查是否有需要提交的更改
           if ! git diff-index --quiet HEAD; then
             DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
             git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (上海时区)"
+            
+            # === 关键修复：在推送前拉取远程代码并变基，解决 'rejected' 错误 ===
+            # 使用 --rebase 避免产生合并提交，保持历史清晰
+            git pull --rebase origin main 
+            # 如果您的主分支不是 main，请修改上面这一行
+            # =====================================================================
+            
             git push
             echo "✅ 成功推送了新报告: $REPORT_PATH"
           else
