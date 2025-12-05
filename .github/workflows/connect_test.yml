@@ -1,0 +1,74 @@
+name: 🌐 Node Connectivity Test (TCP Ping)
+
+# 配置工作流的触发条件
+on:
+  # 1. 允许手动触发 (Workflow Dispatch)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动运行的原因 (可选)'
+        required: false
+        default: 'Manual test run'
+        
+  # 2. 定时触发 (可选，例如每天零点运行)
+  schedule:
+    # 每天 00:00 UTC 运行。
+    # 如果希望在上海时间 08:00 运行（UTC+8），则设置为 00:00 UTC。
+    - cron: '0 0 * * *' 
+  
+  # 3. 当关键文件变动时自动触发 (自动运行)
+  push:
+    paths:
+      # 当工作流文件本身或测试脚本变动时触发
+      - '.github/workflows/connect_test.yml'
+      - 'tcp_ping_test.sh'
+      # 如果想在任何代码推送时都运行，可以添加 '*' 或其他文件路径
+
+# 全局环境变量
+env:
+  TZ: 'Asia/Shanghai' # 设置时区为上海，用于日志中的时间戳
+
+jobs:
+  run_test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: 检出仓库代码
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+        
+      # Step 2: 赋予脚本执行权限
+      - name: ⚙️ Set up Permissions
+        run: chmod +x tcp_ping_test.sh
+        
+      # Step 3: 执行 TCP Ping 测试脚本
+      - name: 🏃 Run TCP Connectivity Test
+        # 为了让脚本输出更详细，并避免失败时立即中断工作流
+        id: test_script
+        run: ./tcp_ping_test.sh | tee script_output.log # 使用 tee 将输出同时写入日志文件
+        
+      # Step 4: 检查是否有新的连通节点文件生成
+      - name: 🔎 Check for Working Nodes
+        id: check_file
+        # 检查 working_nodes.txt 是否存在且不为空
+        run: |
+          if [ -s working_nodes.txt ]; then
+            echo "::set-output name=file_exists::true"
+          else
+            echo "::set-output name=file_exists::false"
+          fi
+          
+      # Step 5: 如果存在连通节点，则提交到仓库
+      # 此步骤只在文件存在且内容发生变化时执行
+      - name: 📤 Commit Working Nodes
+        if: steps.check_file.outputs.file_exists == 'true'
+        uses: EndBug/add-and-commit@v9
+        with:
+          author_name: GitHub Actions Bot
+          author_email: actions@github.com
+          message: "✅ Auto update: Working nodes found [$(date +'%Y-%m-%d %H:%M:%S' -d @$(($(date +%s) + 8*3600)))]"
+          add: 'working_nodes.txt'
+          # 如果工作流文件或脚本本身变动，也一并提交
+          # files: working_nodes.txt
+          
+# 注意：此工作流**没有**使用 artifact 功能来上传文件，而是直接提交到 Git 仓库，符合你的要求。
