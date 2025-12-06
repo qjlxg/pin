@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终版本 - 并行测试)
+# test_connectivity_parallel.py (最终版本 - 已修复文件清理错误)
 import os
 import sys
 import datetime
@@ -13,7 +13,7 @@ import time
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
-   
+
 ]
 
 # 最大并行工作线程数 (推荐 32 或更高)
@@ -62,18 +62,21 @@ def fetch_and_parse_nodes():
 def test_single_node(node_link):
     """
     使用 Clash/Mihomo 核心作为子进程，测试单个节点连通性。
-    此方法比直接使用 requests 库更准确，因为它能处理复杂的 Vmess/Trojan/VLESS 协议。
     """
     
     # 随机生成一个端口用于 Mihomo API
+    # 确保每个并行线程使用唯一的端口和文件名，以避免冲突
     try:
-        api_port = 19190 + os.getpid() % 100 
+        # 使用进程ID的哈希值来确保随机性，避免进程 ID 冲突
+        api_port = 19190 + os.getpid() % 100 + hash(time.time()) % 1000 
     except:
         api_port = 19190 # Fallback 
         
     CLASH_EXEC = "mihomo-linux-amd64"
-    CONFIG_PATH = f"config_{api_port}.yaml"
-    LOG_PATH = f"mihomo_{api_port}.log"
+    # 使用端口号和时间戳的组合来确保文件名唯一性，进一步防止冲突
+    unique_id = f"{api_port}_{int(time.time()*1000)}" 
+    CONFIG_PATH = f"config_{unique_id}.yaml"
+    LOG_PATH = f"mihomo_{unique_id}.log"
     API_HOST = "127.0.0.1"
     
     # 1. 构造一个包含单个节点的 Clash YAML 配置
@@ -87,7 +90,7 @@ proxy-groups:
   - name: TEST_GROUP
     type: select
     proxies:
-      - {node_link.split('://')[0].upper()} # 使用节点类型作为名称，例如 SS/VMESS/TROJAN
+      - {node_link.split('://')[0].upper()}
       
 """
     
@@ -114,6 +117,7 @@ proxy-groups:
         # 3. 启动 Mihomo 核心
         clash_process = subprocess.Popen(
             [f"./{CLASH_EXEC}", '-f', CONFIG_PATH, '-d', '.'],
+            # 将日志输出到一个文件
             stdout=open(LOG_PATH, 'w'), 
             stderr=subprocess.STDOUT
         )
@@ -145,23 +149,30 @@ proxy-groups:
         # 6. 检查结果
         delay = delay_data.get('delay', -1)
         if delay > 0:
-            print(f"✅ SUCCESS ({delay}ms): {proxy_name_final}")
             return True, node_link
         else:
             return False, node_link
             
     except Exception as e:
-        # print(f"❌ FAIL ({proxy_name_final}): {e}", file=sys.stderr)
         return False, node_link
         
     finally:
         # 7. 清理
         if clash_process:
             clash_process.terminate()
-        if os.path.exists(CONFIG_PATH):
-            os.remove(CONFIG_PATH)
-        if os.path.exists(LOG_PATH):
-            os.remove(LOG_PATH)
+            
+        # 关键修复：清理前检查文件是否存在
+        try:
+            if os.path.exists(CONFIG_PATH):
+                os.remove(CONFIG_PATH)
+        except Exception:
+            pass
+            
+        try:
+            if os.path.exists(LOG_PATH):
+                os.remove(LOG_PATH)
+        except Exception:
+            pass
 
 
 def run_parallel_tests(all_nodes):
@@ -171,22 +182,25 @@ def run_parallel_tests(all_nodes):
     print("--- 2. 正在并行连通性测试 ---")
     results = []
     
+    # 过滤掉空的或无效的节点链接，确保只提交有效的任务
+    valid_nodes = [n for n in all_nodes if n.strip()]
+
     # 使用 ThreadPoolExecutor 并行执行测试
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # 提交所有任务
-        futures = {executor.submit(test_single_node, node_link): node_link for node_link in all_nodes}
+        futures = {executor.submit(test_single_node, node_link): node_link for node_link in valid_nodes}
         
         # 收集结果
         for i, future in enumerate(futures):
             # 实时显示进度
-            sys.stdout.write(f"[{i+1}/{len(all_nodes)}] Testing... \r")
+            sys.stdout.write(f"[{i+1}/{len(valid_nodes)}] Testing... \r")
             sys.stdout.flush()
             
             try:
                 status, link = future.result()
                 results.append((status, link))
             except Exception as exc:
-                print(f"[{i+1}/{len(all_nodes)}] ❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
+                print(f"[{i+1}/{len(valid_nodes)}] ❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
                 
     return results
 
