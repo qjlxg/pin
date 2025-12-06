@@ -9,7 +9,7 @@ on:
   push:
     paths:
       - 'ClashForge.py'
-      - '.github/workflows/ClashForge.yml' # 假设文件在默认路径
+      - '.github/workflows/ClashForge.yml' 
       - 'requirements.txt' # 包含依赖文件
 
   # 手动触发
