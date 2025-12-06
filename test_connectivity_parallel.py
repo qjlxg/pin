@@ -1,394 +1,407 @@
-# test_connectivity_parallel.py (最终稳定版：修复所有启动、端口和解析问题)
+# test_connectivity_parallel.py（终极完整版 - 支持 Trojan / VLess / VMess - 2025-12-06）
 import os
 import sys
 import datetime
 import pytz
 import re
 import base64
+import json
+import tempfile
+import shutil
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import requests
-import time
-import threading 
-from urllib.parse import quote, unquote, urlparse, parse_qs 
+from urllib.parse import quote, unquote, urlparse, parse_qs
 
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
+    # 可继续添加其他订阅源
 ]
 
-# 增加测试目标列表，提高可用性判断 (任一目标成功即通过)
 TEST_URLS = [
-    "http://www.google.com/generate_204",  
-    "http://www.youtube.com",             
-    "http://www.microsoft.com",           
+    "http://www.google.com/generate_204",
+    "http://www.youtube.com",
+    "http://www.microsoft.com",
 ]
 
-# 优化建议：将 MAX_WORKERS 调高到 32/64 以加速测试
-MAX_WORKERS = 32 # <-- 性能优化：建议增加到 32 或更高
-# 核心调试设置：增加超时时间
-NODE_TIMEOUT = 10 
-# 最大重试次数
-MAX_RETRIES = 2 
-
-# --- 核心功能 ---
+MAX_WORKERS = 25        # 彻底稳定后建议 20-30，速度极快
+NODE_TIMEOUT = 12
+MAX_RETRIES = 2
 
 def fetch_and_parse_nodes():
-    """
-    下载远程文件，解析出潜在的节点链接。
-    """
     print("--- 1. 正在获取和解析所有节点 ---")
-    
     all_content = []
-    
     for url in REMOTE_CONFIG_URLS:
         try:
             print(f"下载: {url}")
             response = requests.get(url, timeout=15)
             response.raise_for_status()
             all_content.append(response.text)
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ 警告: 下载 {url} 失败: {e}", file=sys.stderr)
-
+        except Exception as e:
+            print(f"⚠️ 下载失败: {e}", file=sys.stderr)
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
-    
-    # 协议过滤已更新：加入 hysteria 和 hy2
     protocol_regex = r'(://|@|\b(vmess|ss|trojan|vless|hysteria|hy2|tuic)\b|server\s*:\s*.)'
-    
     for line in all_lines:
-        stripped_line = line.strip()
-        if stripped_line and not stripped_line.startswith('#'):
-            if re.search(protocol_regex, stripped_line, re.IGNORECASE):
-                cleaned_line = stripped_line.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
-                unique_nodes.add(cleaned_line)
-
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and re.search(protocol_regex, stripped, re.IGNORECASE):
+            cleaned = stripped.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
+            unique_nodes.add(cleaned)
     all_nodes = list(unique_nodes)
     print(f"修复并过滤后，发现 {len(all_nodes)} 个潜在节点链接。")
     return all_nodes
 
 def test_single_node(node_link):
-    """
-    使用 Mihomo 核心作为子进程，进行多目标、多重试的连通性测试。
-    """
-    
-    for attempt in range(MAX_RETRIES):
-        clash_process = None
+    temp_dir = None
+    clash_process = None
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="mihomo_test_")
         
-        try:
-            # === 核心修复：使用线程ID和链接哈希结合，并约束端口范围 (< 65535) ===
-            thread_id = threading.get_ident()
-            link_hash = hash(node_link)
-            
-            # 使用异或(^)结合 thread_id 和 link_hash，并对结果取绝对值
-            combined_hash = abs(thread_id ^ link_hash)
-            
-            # 约束端口种子范围 (例如 0 到 39999)，确保最终端口号不超过 65535
-            constrained_seed = combined_hash % 40000 
-            
-            # 加上尝试次数以确保重试时端口不同
-            port_seed = constrained_seed + attempt 
-            
-            # 使用高位端口范围，确保唯一性: 25000 + 40000 = 65000 (安全范围)
-            api_port = 25000 + port_seed 
-            PROXY_PORT = 15000 + port_seed # 15000 + 40000 = 55000 
-            
-            unique_id = f"{thread_id}_{attempt}" 
-            # ===============================================
-        except Exception:
-            # 回退逻辑
-            unique_id = f"fallback_{attempt}_{int(time.time()*1000)}"
-            api_port = 19190 + attempt
-            PROXY_PORT = 7890 + attempt
-        
-        CLASH_EXEC = "mihomo-linux-amd64"
-        CONFIG_PATH = f"config_{unique_id}.yaml"
-        LOG_PATH = f"mihomo_{unique_id}.log"
-        API_HOST = "127.0.0.1"
-        proxy_name_final = node_link.split('://')[0].upper() # 默认名称
-        
-        # 1. 构造配置 - 确保代理名称安全
-        proxy_label_match = re.search(r'#(.+)', node_link)
-        if proxy_label_match:
+        for attempt in range(MAX_RETRIES):
+            seed_str = f"{node_link}_{attempt}_{threading.get_ident()}_{int(time.time()*100000)}"
+            seed = abs(hash(seed_str)) % 25000
+            api_port = 30000 + seed
+            proxy_port = 40000 + seed
+            unique_id = f"t{threading.get_ident()}_a{attempt}_{seed}"
+            config_path = os.path.join(temp_dir, f"config_{unique_id}.yaml")
+            log_path = os.path.join(temp_dir, f"mihomo_{unique_id}.log")
+
+            # === 统一提取节点名称 ===
+            proxy_name_final = "TEST_NODE"
+            remark_match = re.search(r'#(.+)', node_link)
+            if remark_match:
+                try:
+                    proxy_name_final = re.sub(r'[\'\":\[\]]', '', unquote(remark_match.group(1)).strip())[:60]
+                except:
+                    pass
+
+            proxy_config_yaml = ""
             try:
-                raw_name = unquote(proxy_label_match.group(1).strip())
-                # 清理代理名称中的特殊字符
-                proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
-            except Exception:
-                pass
-        
-        GROUP_NAME = "NODE_TEST_GROUP" 
+                url_parts = urlparse(node_link)
+                protocol = url_parts.scheme.lower()
 
-        # --- 核心：手动解析链接并构造 Mihomo YAML 格式 (支持 Trojan-WS) ---
-        proxy_config_yaml = ""
+                if protocol not in ['trojan', 'vless', 'vmess']:
+                    return False, node_link
 
-        try:
-            url_parts = urlparse(node_link)
-            protocol = url_parts.scheme.lower()
-            
-            if protocol == 'trojan':
-                # 提取基础组件
-                password = url_parts.username
-                server = url_parts.hostname
-                port = url_parts.port
-                
-                if not (password and server and port):
-                    return False, node_link 
+                # ==================== Trojan ====================
+                if protocol == 'trojan':
+                    password = url_parts.username
+                    server = url_parts.hostname
+                    port = url_parts.port or 443
+                    if not (password and server and port):
+                        raise ValueError("Trojan 链接缺失必要字段")
+                    params = parse_qs(url_parts.query)
 
-                # 解析查询参数
-                params = parse_qs(url_parts.query)
-                
-                # --- TLS 配置 ---
-                tls_config = ""
-                tls_setting = "true" 
-                
-                # SNI
-                sni = params.get('sni', [''])[0].strip()
-                if sni:
-                    tls_config += f"    sni: {sni}\n"
-                
-                tls_config += f"    tls: {tls_setting}\n    skip-cert-verify: false\n"
-                
-                allow_insecure_param = params.get('allowinsecure', params.get('allowlnsecure', [''])[0])
-                if allow_insecure_param.lower() in ['1', 'true']:
-                     tls_config = tls_config.replace("skip-cert-verify: false", "skip-cert-verify: true")
-                
-                # --- WebSocket 配置 ---
-                ws_config = ""
-                if params.get('type', [''])[0].lower() == 'ws':
-                    path = unquote(params.get('path', ['/'])[0])
-                    # 修复：确保 host 字段正确获取，默认为服务器地址
-                    host_header = params.get('host', [server])[0] 
-                    
-                    ws_config = f"""
-    network: ws
-    ws-opts:
-      path: {path}
-      headers:
-        Host: {host_header}
+                    tls_config = "  tls: true\n  skip-cert-verify: false\n"
+                    sni = params.get('sni', params.get('peer', ['']))[0] or server
+                    if sni:
+                        tls_config += f"  servername: {sni}\n"
+
+                    if params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']:
+                        tls_config = tls_config.replace("false", "true")
+
+                    ws_config = ""
+                    if params.get('type', [''])[0].lower() == 'ws':
+                        path = unquote(params.get('path', ['/'])[0])
+                        host_header = params.get('host', [sni])[0]
+                        ws_config = f"""
+  network: ws
+  ws-opts:
+    path: {path}
+    headers:
+      Host: {host_header}
 """
-                
-                # --- 最终 YAML 组合 ---
-                proxy_config_yaml = f"""
+
+                    proxy_config_yaml = f"""
   - name: {proxy_name_final}
     type: trojan
     server: {server}
     port: {port}
     password: {password}
-{tls_config}
-{ws_config}
+{tls_config}{ws_config}
 """
-            if not proxy_config_yaml:
-                return False, node_link 
 
-        except Exception as e:
-            # 记录解析错误但不重试，因为链接本身有问题
-            print(f"\n❌ FATAL PARSE ERROR: 处理 {node_link[:50]}... 失败: {e}", file=sys.stderr)
-            return False, node_link 
+                # ==================== VLess ====================
+                elif protocol == 'vless':
+                    uuid = url_parts.username
+                    server = url_parts.hostname
+                    port = url_parts.port or 443
+                    if not (uuid and server and port):
+                        raise ValueError("VLess 链接缺失必要字段")
+                    params = parse_qs(url_parts.query)
 
+                    security = params.get('security', ['none'])[0].lower()
+                    flow = params.get('flow', [''])[0]
+                    network = params.get('type', ['tcp'])[0].lower()
+                    sni = params.get('sni', params.get('peer', ['']))[0] or server
+                    allow_insecure = params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']
 
-        # 2. 保存配置
-        yaml_content = f"""
-mixed-port: {PROXY_PORT} 
-external-controller: {API_HOST}:{api_port}
+                    tls_config = ""
+                    if security == 'tls':
+                        tls_config = f"""
+    tls: true
+    skip-cert-verify: {str(allow_insecure).lower()}
+    servername: {sni}
+"""
+                    elif security == 'reality':
+                        # 基础 Reality 支持
+                        pbk = params.get('pbk', [''])[0]
+                        short_id = params.get('sid', [''])[0]
+                        if not pbk:
+                            raise ValueError("Reality 需要 pbk")
+                        tls_config = f"""
+    tls: true
+    skip-cert-verify: true
+    reality-opts:
+      public-key: {pbk}
+      short-id: {short_id or '0'}
+"""
+
+                    flow_config = f"    flow: {flow}\n" if flow else ""
+
+                    ws_grpc_config = ""
+                    if network == 'ws':
+                        path = unquote(params.get('path', ['/'])[0])
+                        host = params.get('host', [sni])[0]
+                        ws_grpc_config = f"""
+    network: ws
+    ws-opts:
+      path: {path}
+      headers:
+        Host: {host}
+"""
+                    elif network == 'grpc':
+                        service_name = params.get('serviceName', ['GunService'])[0]
+                        ws_grpc_config = f"""
+    network: grpc
+    grpc-opts:
+      grpc-service-name: {service_name}
+"""
+
+                    proxy_config_yaml = f"""
+  - name: {proxy_name_final}
+    type: vless
+    server: {server}
+    port: {port}
+    uuid: {uuid}
+    udp: true
+{flow_config}{tls_config}{ws_grpc_config}
+"""
+
+                # ==================== VMess ====================
+                elif protocol == 'vmess':
+                    body = node_link[8:]
+                    if '#' in body:
+                        body, extra_remark = body.split('#', 1)
+                        if not proxy_name_final:
+                            proxy_name_final = re.sub(r'[\'\":\[\]]', '', unquote(extra_remark).strip())[:60]
+
+                    # 补 padding
+                    body += '=' * ((4 - len(body) % 4) % 4)
+                    try:
+                        vmess_json = json.loads(base64.b64decode(body).decode('utf-8'))
+                    except Exception as e:
+                        raise ValueError(f"VMess base64 解码失败: {e}")
+
+                    server = vmess_json['add']
+                    port = int(vmess_json['port'])
+                    uuid = vmess_json['id']
+                    aid = int(vmess_json.get('aid', 0))
+                    scy = vmess_json.get('scy', 'auto')
+                    net = vmess_json.get('net', 'tcp')
+                    tls = vmess_json.get('tls', '')
+                    sni = vmess_json.get('sni', vmess_json.get('host', server))
+                    path = vmess_json.get('path', '')
+                    host = vmess_json.get('host', '')
+                    ps = vmess_json.get('ps', '')
+                    if not proxy_name_final:
+                        proxy_name_final = re.sub(r'[\'\":\[\]]', '', unquote(ps).strip())[:60]
+
+                    tls_config = ""
+                    if tls == 'tls':
+                        tls_config = f"""
+    tls: true
+    skip-cert-verify: false
+    servername: {sni}
+"""
+
+                    network_config = ""
+                    if net == 'ws':
+                        headers = f"\n        Host: {host or sni}" if host or sni else ""
+                        network_config = f"""
+    network: ws
+    ws-opts:
+      path: {path or '/'}{headers}
+"""
+                    elif net == 'grpc':
+                        network_config = f"""
+    network: grpc
+    grpc-opts:
+      grpc-service-name: {path or 'GunService'}
+"""
+                    elif net == 'http':
+                        network_config = f"""
+    network: http
+    http-opts:
+      path: [{path or '/'}]
+"""
+
+                    proxy_config_yaml = f"""
+  - name: {proxy_name_final}
+    type: vmess
+    server: {server}
+    port: {port}
+    uuid: {uuid}
+    alterId: {aid}
+    cipher: {scy}
+    udp: true
+{tls_config}{network_config}
+"""
+
+            except Exception as e:
+                print(f"\n❌ 解析失败 {protocol.upper()} {node_link[:60]}: {e}", file=sys.stderr)
+                return False, node_link
+
+            if not proxy_config_yaml.strip():
+                return False, node_link
+
+            # === 写入完整配置文件 ===
+            yaml_content = f"""log-level: info
+allow-lan: false
+mode: rule
+mixed-port: {proxy_port}
+external-controller: 127.0.0.1:{api_port}
 secret: githubactions
+
 proxies:
 {proxy_config_yaml}
+
 proxy-groups:
-  - name: {GROUP_NAME}
+  - name: NODE_TEST_GROUP
     type: select
     proxies:
       - {proxy_name_final}
 """
-        try:
-            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-                f.write(yaml_content)
-        except Exception:
-            continue # 如果文件写入失败，尝试下一轮重试
-            
-        is_successful = False
-        api_started = False
-        mihomo_log_content = "" 
 
-        try:
-            # 3. 启动 Mihomo 核心
-            # 注意: 使用 stdout=open(LOG_PATH, 'w') 是为了确保实时输出到日志文件
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(yaml_content)
+
+            # === 启动 mihomo ===
             clash_process = subprocess.Popen(
-                [f"./{CLASH_EXEC}", '-f', CONFIG_PATH, '-d', '.'],
-                stdout=open(LOG_PATH, 'w'), 
+                ["./mihomo-linux-amd64", "-f", config_path, "-d", temp_dir],
+                stdout=open(log_path, 'w'),
                 stderr=subprocess.STDOUT
             )
-            
-            # 4. 等待 API 启动
-            api_url = f"http://{API_HOST}:{api_port}/version"
+
+            # === 等待 API 就绪 ===
+            api_url = f"http://127.0.0.1:{api_port}/version"
             headers = {'Authorization': 'Bearer githubactions'}
-            
-            # 等待 10 个 0.5 秒间隔 (最多 5 秒)
-            for _ in range(10): 
+            api_started = False
+            for _ in range(16):
                 try:
-                    response = requests.get(api_url, headers=headers, timeout=0.5)
-                    if response.status_code == 200:
+                    r = requests.get(api_url, headers=headers, timeout=1)
+                    if r.status_code == 200:
                         api_started = True
                         break
-                except requests.exceptions.RequestException:
-                    pass
-                time.sleep(0.5)
-            
-            # 如果 API 没起来，跳过测试，进入重试/清理
+                except:
+                    time.sleep(0.5)
             if not api_started:
-                continue 
-            
-            # 给予 Mihomo 额外的 1 秒缓冲时间
-            time.sleep(1) 
-            
-            # 5. --- 多目标 URL 连通性测试 ---
-            encoded_proxy_name_for_delay = quote(proxy_name_final)
-            
+                continue
+
+            time.sleep(1.5)
+
+            # === 延迟测试 ===
+            encoded_name = quote(proxy_name_final)
             for test_url in TEST_URLS:
-                # 使用 /delay API 进行连通性测试
-                api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
-                
+                delay_url = f"http://127.0.0.1:{api_port}/proxies/{encoded_name}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT * 1000}"
                 try:
-                    response = requests.get(api_delay_url, headers=headers, timeout=NODE_TIMEOUT + 2) 
-                    response.raise_for_status()
-                    delay_data = response.json()
-                    
-                    # 检查是否成功返回延迟值 (> 0)
-                    if delay_data.get('delay', -1) > 0:
-                        is_successful = True
-                        break 
-                except Exception:
+                    r = requests.get(delay_url, headers=headers, timeout=NODE_TIMEOUT + 2)
+                    if r.json().get('delay', 0) > 0:
+                        return True, node_link
+                except:
                     pass
 
-            if is_successful:
-                return True, node_link 
-                
-        except Exception:
-            pass
-            
-        finally:
-            # 6. 清理和日志记录
-            
-            # 失败时打印 Mihomo 日志
-            if not is_successful and os.path.exists(LOG_PATH):
-                try:
-                    with open(LOG_PATH, 'r', encoding='utf-8') as f:
-                        mihomo_log_content = f.read()
-                    
-                    if mihomo_log_content.strip():
-                        print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
-                        # 仅打印前 2000 个字符以保持日志简洁
-                        print(mihomo_log_content[:2000], file=sys.stderr)
-                        print("..." if len(mihomo_log_content) > 2000 else "", file=sys.stderr)
-                        print("-" * 50, file=sys.stderr)
-                        
-                except Exception:
-                    pass 
+            # 失败打印日志
+            if os.path.exists(log_path):
+                with open(log_path, 'r', encoding='utf-8') as f:
+                    log_content = f.read()
+                if log_content.strip():
+                    print(f"\n--- ❌ 节点 {proxy_name_final} 失败 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
+                    print(log_content[:2500], file=sys.stderr)
+                    print("-" * 50, file=sys.stderr)
 
-            # 终止 Mihomo 进程
-            if clash_process:
-                clash_process.terminate()
-                
-            # 清理配置文件和日志文件
-            for path in [CONFIG_PATH, LOG_PATH]:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
-        
-        # 失败后等待 1 秒再重试
-        if attempt < MAX_RETRIES - 1:
-            time.sleep(1) 
-
-    return False, node_link 
-
+    except Exception as e:
+        print(f"未知异常: {e}", file=sys.stderr)
+    finally:
+        if clash_process:
+            clash_process.kill()
+            try:
+                clash_process.wait(timeout=3)
+            except:
+                pass
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    return False, node_link
 
 def run_parallel_tests(all_nodes):
-    """
-    使用线程池并行测试所有节点。
-    """
     print("--- 2. 正在并行连通性测试 ---")
-    results = []
     valid_nodes = [n for n in all_nodes if n.strip()]
-
+    results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(test_single_node, node_link): node_link for node_link in valid_nodes}
-        
-        for i, future in enumerate(futures):
-            # 实时进度显示
-            sys.stdout.write(f"[{i+1}/{len(valid_nodes)}] Testing... \r")
+        futures = {executor.submit(test_single_node, node): node for node in valid_nodes}
+        for i, future in enumerate(futures, 1):
+            print(f"[{i}/{len(valid_nodes)}] Testing... \r", end="")
             sys.stdout.flush()
-            
-            try:
-                status, link = future.result()
-                results.append((status, link))
-            except Exception as exc:
-                print(f"\n❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
-                
-    # 清除进度显示行
-    sys.stdout.write(" " * 50 + "\r")
-    sys.stdout.flush()
-    
+            status, link = future.result()
+            results.append((status, link))
+    print(" " * 80 + "\r", end="")
     return results
 
-
 def save_results(results):
-    """
-    生成并保存成功的节点链接到固定的文件。
-    """
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     now_shanghai = datetime.datetime.now(shanghai_tz)
-    
     output_dir = now_shanghai.strftime('%Y/%m')
-    output_filename = 'success-nodes-parallel.txt' 
+    output_filename = 'success-nodes-parallel.txt'
     output_path = os.path.join(output_dir, output_filename)
-
     successful_nodes = [link for status, link in results if status]
     
     print("--- 3. 正在生成报告 ---")
-    
     if not successful_nodes:
         print("⚠️ 没有节点测试成功。不生成报告文件。")
         return None
-
     os.makedirs(output_dir, exist_ok=True)
     
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("# 节点连通性测试成功结果 (并行测试)\n")
+        f.write("# 节点连通性测试成功结果 (支持 Trojan/VLess/VMess 并行测试)\n")
         f.write(f"测试时间 (上海): {now_shanghai.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"总节点数: {len(results)}\n")
         f.write(f"成功连接数: {len(successful_nodes)}\n")
         f.write(f"测试目标: {', '.join(TEST_URLS)} (任一成功即通过)\n")
         f.write(f"最大重试次数: {MAX_RETRIES}\n")
         f.write("---\n")
-        
         for link in successful_nodes:
             f.write(f"{link}\n")
-
     print(f"✅ 测试完成。成功节点列表已保存到: {output_path}")
     return output_path
 
 if __name__ == "__main__":
-    
     if not os.path.exists("./mihomo-linux-amd64"):
-        print("❌ 错误：Mihomo 核心文件 ./mihomo-linux-amd64 未找到。", file=sys.stderr)
+        print("❌ 未找到 mihomo-linux-amd64", file=sys.stderr)
         sys.exit(1)
     
-    try:
-        subprocess.run(['chmod', '+x', './mihomo-linux-amd64'], check=True)
-    except:
-        pass 
-        
-    all_nodes = fetch_and_parse_nodes()
+    os.system("chmod +x ./mihomo-linux-amd64")
     
+    all_nodes = fetch_and_parse_nodes()
     if not all_nodes:
-        print("没有找到任何节点，退出。")
+        print("没有节点，退出。")
         sys.exit(0)
     
     results = run_parallel_tests(all_nodes)
     
     final_path = save_results(results)
-    
     if final_path:
         print(f"REPORT_PATH={final_path}")
