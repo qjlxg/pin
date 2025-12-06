@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py（GitHub Actions 完美稳定版 V5 - 共享 GeoData/GeoLoader）
+# test_connectivity_parallel.py（GitHub Actions 最终稳定版 V6 - 假定 GeoData 已存在）
 
 import os
 import sys
@@ -38,63 +38,12 @@ MAX_API_WAIT_TIME = 30 # 最大 API 等待时间 (秒)
 NODE_TIMEOUT = 15
 MAX_RETRIES = 2
 VERBOSE = True
-# 共享 GeoData 目录
+# 共享 GeoData 目录 (此目录必须包含 geoip.dat 和 geosite.dat)
 SHARED_GEO_DIR = "./geodata_cache"
 
 # 将 API 启动检测的循环次数调整到匹配 MAX_API_WAIT_TIME
 API_WAIT_LOOPS = int(MAX_API_WAIT_TIME / 0.5) 
 
-# --- GeoData 检查和下载（在主线程中运行） ---
-def check_and_download_geodata():
-    """检查并确保 GeoData 存在，如果不存在则启动 mihomo 下载。"""
-    os.makedirs(SHARED_GEO_DIR, exist_ok=True)
-    geoip_path = os.path.join(SHARED_GEO_DIR, "geoip.dat")
-    geosite_path = os.path.join(SHARED_GEO_DIR, "geosite.dat")
-    
-    # 检查 GeoData 文件是否存在
-    if os.path.exists(geoip_path) and os.path.exists(geosite_path):
-        print(f"✅ GeoData 文件已存在于 {SHARED_GEO_DIR}，跳过下载。", flush=True)
-        return True
-
-    print(f"⚠️ GeoData 文件不存在，正在通过 mihomo 下载 GeoIP/GeoSite (最多等待 60s)...", flush=True)
-    temp_config_path = os.path.join(SHARED_GEO_DIR, "temp_config_download.yaml")
-    
-    # 创建一个极简配置，目的是触发 mihomo 下载 GeoData
-    temp_yaml = f"""
-log-level: info
-mixed-port: 50000
-geodata-dir: {SHARED_GEO_DIR}
-proxies:
-  - name: dummy
-    type: http
-    server: 127.0.0.1
-    port: 1
-"""
-    with open(temp_config_path, 'w', encoding='utf-8') as f:
-        f.write(temp_yaml)
-        
-    # 启动 mihomo 进程，下载完成后会自动退出
-    try:
-        download_process = subprocess.Popen(
-            ["./mihomo-linux-amd64", "-f", temp_config_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        # 最多等待 60 秒下载 GeoData
-        download_process.wait(timeout=60) 
-    except Exception as e:
-        print(f"❌ GeoData 下载失败: {e}", file=sys.stderr, flush=True)
-        return False
-    finally:
-        if os.path.exists(temp_config_path):
-            os.remove(temp_config_path)
-
-    if os.path.exists(geoip_path) and os.path.exists(geosite_path):
-        print(f"✅ GeoData 下载完成，文件保存在 {SHARED_GEO_DIR}。", flush=True)
-        return True
-    else:
-        print("❌ GeoData 下载失败，请检查网络。", file=sys.stderr, flush=True)
-        return False
 
 # --- 节点获取函数（未变动） ---
 def fetch_and_parse_nodes():
@@ -183,7 +132,6 @@ def test_single_node(node_link):
                     if raw_protocol in ['hy2', 'hysteria2']:
                         protocol = 'hysteria2'
 
-                    # VLESS 解析 (省略代码细节，保证逻辑正确)
                     if protocol == 'vless':
                         uuid = url_parts.username
                         server = url_parts.hostname
@@ -221,7 +169,6 @@ def test_single_node(node_link):
     udp: true
 {flow_config}{tls_config}{transport_config}"""
 
-                    # TROJAN 解析 (省略代码细节)
                     elif protocol == 'trojan':
                         password = url_parts.username or ""
                         server = url_parts.hostname
@@ -242,7 +189,6 @@ def test_single_node(node_link):
     password: {password}
 {tls_config}{ws_config}"""
 
-                    # VMESS 解析 (省略代码细节)
                     elif protocol == 'vmess':
                         body = node_link[8:].split('#')[0]
                         body += '=' * ((4 - len(body) % 4) % 4)
@@ -274,7 +220,6 @@ def test_single_node(node_link):
     udp: true
 {tls_config}{network_config}"""
 
-                    # HYSTERIA2 解析 (省略代码细节)
                     elif protocol == 'hysteria2':
                         password = url_parts.username or ""
                         server = url_parts.hostname
@@ -484,21 +429,19 @@ if __name__ == "__main__":
 
     os.system("chmod +x ./mihomo-linux-amd64")
     
-    # 步骤 1：检查或下载 GeoData
-    if not check_and_download_geodata():
-        print("❌ 无法获取 GeoData 文件，测试无法继续。", file=sys.stderr)
-        sys.exit(1)
+    # ⚠️ 关键调整：由于您已手动下载 GeoData，此处不再进行检查或下载，直接使用本地文件。
+    print(f"✅ 脚本已调整：将直接使用 {SHARED_GEO_DIR} 目录下的 GeoData 文件进行启动。", flush=True)
 
-    # 步骤 2：获取节点
+    # 步骤 1：获取节点
     all_nodes = fetch_and_parse_nodes()
     if not all_nodes:
         print("无节点，退出")
         sys.exit(0)
 
-    # 步骤 3：并行测试
+    # 步骤 2：并行测试
     results = run_parallel_tests(all_nodes)
     
-    # 步骤 4：保存结果
+    # 步骤 3：保存结果
     final_path = save_results(results)
     if final_path:
         print(f"\nREPORT_PATH={final_path}")
