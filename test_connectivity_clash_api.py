@@ -1,4 +1,4 @@
-# test_connectivity_clash_api.py (已移除 Subconverter 转换超时限制)
+# test_connectivity_clash_api.py (最终无限制版，使用本地 INI 模板)
 import os
 import sys
 import datetime
@@ -13,13 +13,15 @@ import time
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt",
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/all_unique_nodes.txt",
-    "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt",
+
 ]
 
 # *** 核心：本地可执行文件路径 ***
 LOCAL_MIHOMO_FILENAME = "mihomo-linux-amd64" 
 LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" 
+
+# *** 核心：自定义 INI 文件路径 ***
+LOCAL_INI_PATH = "./my_custom_clash_template.ini" 
 
 CLASH_EXECUTABLE = f"./{LOCAL_MIHOMO_FILENAME}"
 CLASH_CONFIG_PATH = "mihomo_config.yaml"
@@ -71,31 +73,35 @@ def fetch_and_parse_nodes():
 def convert_nodes_with_local_subconverter(raw_nodes_string):
     """
     通过本地 Subconverter 可执行文件将原始节点列表通过 stdin 转换为 Clash YAML。
+    已移除超时限制。
     """
     print("--- 3. 正在调用本地 Subconverter 转换配置 (通过 stdin 输入) ---")
     
     if not os.path.exists(LOCAL_SUB_EXECUTABLE):
         print(f"❌ 错误：本地 Subconverter 文件未找到。", file=sys.stderr)
         return False
+        
+    if not os.path.exists(LOCAL_INI_PATH):
+        print(f"❌ 错误：自定义 INI 文件未找到，路径：{LOCAL_INI_PATH}", file=sys.stderr)
+        return False
 
     # 构建 Subconverter 命令行参数
     command = [
         LOCAL_SUB_EXECUTABLE,
-        '-r', 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini', 
+        '-r', f'file://{LOCAL_INI_PATH}', # <--- 使用本地 INI 模板
         '-f', 'text', 
         '-e', 'false',
     ]
     
     try:
-        # 核心修复：移除 timeout 参数，让 Subconverter 运行直到完成
-        print("Subconverter 转换中... (此过程可能耗时较长，请耐心等待)")
+        print("Subconverter 转换中... (已移除超时限制)")
         result = subprocess.run(
             command, 
-            input=raw_nodes_string, 
+            input=raw_nodes_string, # 直接传递字符串 (str) 对象，无超时限制
             capture_output=True, 
             text=True, 
             check=True, 
-            # timeout=None (默认为无限制，或显式移除 timeout 参数)
+            # timeout=None (默认为无限制)
         )
         yaml_content = result.stdout
         
@@ -169,6 +175,7 @@ def run_clash_test(clash_process):
         config_data = response.json()
         
         test_group_name = None
+        # 寻找第一个 URL-Test 组 (在我们的定制模板中是 🚀 自动测速)
         for group in config_data['proxyGroups']:
             if group['type'].lower() == 'urltest': 
                 test_group_name = group['name']
