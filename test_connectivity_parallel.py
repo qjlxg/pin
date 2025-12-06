@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定运行版：修复端口冲突)
+# test_connectivity_parallel.py (最终稳定运行版：修复 Trojan-WS 解析)
 import os
 import sys
 import datetime
@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import requests
 import time
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse, parse_qs # <-- 新增 urlparse 和 parse_qs
 
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
@@ -25,7 +25,7 @@ TEST_URLS = [
 
 # 核心调试设置：降低并发，解决资源耗尽问题
 MAX_WORKERS = 4 
-# 核心调试设置：增加超时时间，解决 Mihomo 启动时间长的问题
+# 核心调试设置：增加超时时间
 NODE_TIMEOUT = 10 
 # 最大重试次数
 MAX_RETRIES = 2 
@@ -79,7 +79,7 @@ def test_single_node(node_link):
             unique_id = f"{os.getpid()}_{attempt}_{int(time.time()*1000)}" 
             port_seed = os.getpid() % 100 + hash(node_link) % 1000 + attempt 
             
-            # === 核心修复 1：动态分配 API 端口和代理端口 ===
+            # 动态分配 API 端口和代理端口
             api_port = 19190 + port_seed 
             PROXY_PORT = 7890 + port_seed
         except:
@@ -98,7 +98,8 @@ def test_single_node(node_link):
         proxy_label_match = re.search(r'#(.+)', node_link)
         if proxy_label_match:
             try:
-                raw_name = unquote(proxy_label_match.group(1))
+                # 安全地解码名称，并进行清理
+                raw_name = unquote(proxy_label_match.group(1).strip())
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
@@ -106,49 +107,92 @@ def test_single_node(node_link):
         # 设定一个不会与节点名冲突的群组名称
         GROUP_NAME = "NODE_TEST_GROUP" 
 
-        # === 核心修复 2：手动解析链接并构造 Mihomo YAML 格式 (Trojan) ===
+        # === 核心修复：手动解析链接并构造 Mihomo YAML 格式 (支持 Trojan-WS) ===
         proxy_config_yaml = ""
-        protocol = node_link.split('://')[0].lower()
 
         try:
+            url_parts = urlparse(node_link)
+            protocol = url_parts.scheme.lower()
+            
             if protocol == 'trojan':
-                # 匹配 trojan://password@host:port
-                match = re.search(r'trojan://([^@]+)@([^:/]+):(\d+)', node_link)
-                if match:
-                    password, server, port = match.groups()
-                    # 注意：您的链接包含额外的 ws, sni 等参数，但基础解析能让 Mihomo 尝试连接
-                    proxy_config_yaml = f"""
+                # 提取基础组件
+                password = url_parts.username
+                server = url_parts.hostname
+                port = url_parts.port
+                
+                if not (password and server and port):
+                    raise ValueError("Trojan link missing essential components.")
+
+                # 解析查询参数
+                params = parse_qs(url_parts.query)
+                
+                # --- TLS 配置 ---
+                tls_config = ""
+                tls_setting = "true" 
+                
+                # SNI
+                sni = params.get('sni', [''])[0].strip()
+                if sni:
+                    tls_config += f"    sni: {sni}\n"
+                
+                # 默认值
+                tls_config += f"    tls: {tls_setting}\n    skip-cert-verify: false\n"
+                
+                # 处理 allowlnsecure/allowinsecure 参数 (跳过证书验证)
+                # 注意： Mihomo 使用 skip-cert-verify: true
+                if params.get('allowinsecure', params.get('allowlnsecure', [''])[0]).lower() in ['1', 'true']:
+                     tls_config = tls_config.replace("skip-cert-verify: false", "skip-cert-verify: true")
+                
+                # --- WebSocket 配置 ---
+                ws_config = ""
+                if params.get('type', [''])[0].lower() == 'ws':
+                    # Path 需要 URL 解码
+                    path = unquote(params.get('path', ['/'])[0])
+                    # Host 头部，默认使用 server, 否则使用 ?host= 参数
+                    host_header = params.get('host', [server])[0] 
+                    
+                    ws_config = f"""
+    network: ws
+    ws-opts:
+      path: {path}
+      headers:
+        Host: {host_header}
+"""
+                
+                # --- 最终 YAML 组合 ---
+                proxy_config_yaml = f"""
   - name: {proxy_name_final}
     type: trojan
     server: {server}
     port: {port}
     password: {password}
-    tls: true
+{tls_config}
+{ws_config}
 """
-                else:
-                    return False, node_link 
+
+            # TODO: 如果需要支持 Vmess/Vless 等，应在此处添加对应的解析逻辑
 
             if not proxy_config_yaml:
-                return False, node_link 
+                return False, node_link # 解析失败或协议不支持
 
-        except Exception:
-            return False, node_link 
+        except Exception as e:
+            print(f"\n❌ FATAL PARSE ERROR (Trojan): 处理 {node_link[:50]}... 失败: {e}", file=sys.stderr)
+            return False, node_link # 解析异常，返回失败
 
-        # === 核心修复 3：YAML 配置使用动态端口 ===
+
+        # 2. 保存配置
         yaml_content = f"""
 mixed-port: {PROXY_PORT} 
 external-controller: {API_HOST}:{api_port}
 secret: githubactions
 proxies:
-{proxy_config_yaml}  # 插入正确的 YAML Map 结构
+{proxy_config_yaml}  # 插入完整的 YAML Map 结构
 proxy-groups:
   - name: {GROUP_NAME}
     type: select
     proxies:
-      - {proxy_name_final} # 引用单个节点的名称
+      - {proxy_name_final}
 """
-        
-        # 2. 保存配置
         try:
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 f.write(yaml_content)
@@ -191,7 +235,6 @@ proxy-groups:
             encoded_proxy_name_for_delay = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
-                # Mihomo API 延迟测试
                 api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
