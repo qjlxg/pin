@@ -1,0 +1,93 @@
+name: Generate and Push Trojan Links
+
+# ------------------------------------------
+# 触发事件配置
+# ------------------------------------------
+on:
+  # 1. 手动触发 (可以从 Actions 页面手动运行)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动运行的原因 (可选)'
+        required: false
+        default: 'Manual run via GitHub UI'
+
+  # 2. 定时运行 (每天 UTC 01:00，转换为上海时区为 09:00)
+  schedule:
+    # 每天早上 9 点（上海时区）运行
+    - cron: '0 1 * * *' 
+
+  # 3. 文件变动自动运行
+  push:
+    branches:
+      - master # 替换为您的主分支名称
+      - main   # 替换为您的主分支名称
+    paths:
+      # 监控以下文件的变动
+      - 'link.txt'
+      - 'generate_config.py'
+      - '.github/workflows/generate_and_push.yml'
+
+# ------------------------------------------
+# 全局时区设置 (上海时区)
+# ------------------------------------------
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  generate_and_push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 步骤 1: 检出代码
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        # 必须设置 token 和 fetch-depth，以便后续能够推送
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0 
+
+      # 步骤 2: 设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+
+      # 步骤 3: 安装依赖 (如果脚本有依赖，这里添加)
+      # - name: Install dependencies
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     pip install -r requirements.txt # 如果有
+
+      # 步骤 4: 运行 Python 脚本生成链接文件
+      - name: Run Python Script to Generate Links
+        run: python generate_config.py
+
+      # 步骤 5: 检查是否有文件变动 (新生成的 trojan_links.txt)
+      - name: Check for Changes
+        id: git_status
+        run: |
+          # 检查工作区是否有未提交的更改
+          if git diff --exit-code --name-only; then
+            echo "::set-output name=has_changes::false"
+          else
+            echo "::set-output name=has_changes::true"
+          fi
+          
+      # 步骤 6: 提交并推送文件变动
+      - name: Commit and Push Changes
+        if: steps.git_status.outputs.has_changes == 'true'
+        run: |
+          # 设置 Git 用户信息
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # 添加生成的文件
+          git add trojan_links.txt
+
+          # 提交更改
+          commit_message="🤖 Auto-update: Generated trojan_links.txt [$(date +%Y-%m-%d\ %H:%M:%S)]"
+          git commit -m "${commit_message}" 
+
+          # 推送更改到仓库
+          git push
