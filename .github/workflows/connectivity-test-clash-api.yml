@@ -12,6 +12,7 @@ on:
     paths:
       - 'test_connectivity_clash_api.py'
       - 'mihomo-linux-amd64'
+      - 'subconverter/**' # 确保监测 subconverter 目录内的文件变化
       - '.github/workflows/connectivity-test-clash-api.yml'
       
 jobs:
@@ -30,7 +31,6 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v4
         with:
-          # 允许后续步骤推送新的提交
           fetch-depth: 0 
           
       - name: 🐍 设置 Python 环境
@@ -41,7 +41,7 @@ jobs:
       - name: ⚙️ 安装依赖 (requests, pytz)
         run: pip install requests pytz
 
-      - name: 💾 检查 Mihomo 核心
+      - name: 💾 检查 Mihomo 核心 (mihomo-linux-amd64)
         run: |
           MIHOMO_EXEC="./mihomo-linux-amd64"
           if [ ! -f "$MIHOMO_EXEC" ]; then
@@ -49,35 +49,35 @@ jobs:
             exit 1
           fi
           chmod +x "$MIHOMO_EXEC"
-          echo "Mihomo 核心授权执行成功。"
+          echo "✅ Mihomo 核心检查成功，已授权执行。"
 
-      - name: ⚙️ 下载 Subconverter 可执行文件
-        id: download-subconverter
+      - name: ⚙️ 检查 Subconverter 核心 (智能修复路径)
+        id: check-subconverter
         run: |
-          # 从稳定 Release v0.9.0 下载 Linux AMD64 版本
-          SUB_ARCHIVE_URL="https://github.com/tindy2013/subconverter/releases/download/v0.9.0/subconverter_linux64.tar.gz"
-          ARCHIVE_NAME="subconverter.tar.gz"
-          SUB_EXEC_FINAL="./subconverter-linux64" 
-
-          echo "下载 Subconverter 压缩包..."
-          if ! curl -o "$ARCHIVE_NAME" -L "$SUB_ARCHIVE_URL"; then
-            echo "::error::Subconverter 下载失败，请检查链接。"
-            exit 1
-          fi
+          # 脚本期望的最终路径
+          SUB_EXEC_FINAL="./subconverter-linux64"
           
-          echo "解压 Subconverter..."
-          tar -xzf "$ARCHIVE_NAME"
+          # 1. 检查是否已存在于期望路径 (如果用户之前重命名成功)
+          if [ -f "$SUB_EXEC_FINAL" ]; then
+            echo "✅ Subconverter 已位于期望路径。"
           
-          # 解压后的文件名为 subconverter
-          if [ -f "subconverter" ]; then
-            mv "subconverter" "$SUB_EXEC_FINAL"
+          # 2. 检查目录路径 (如果用户上传了 subconverter 目录)
+          elif [ -f "./subconverter/subconverter" ]; then
+            echo "⚠️ 在 './subconverter/subconverter' 路径找到文件，正在移动和重命名..."
+            # 移动文件并重命名
+            mv subconverter/subconverter "$SUB_EXEC_FINAL"
+            # 清理目录 (可选)
+            rm -rf subconverter 
+            echo "✅ 成功移动并重命名为 $SUB_EXEC_FINAL。"
+            
           else
-            echo "::error::解压后的 subconverter 可执行文件未找到，请检查 tar.gz 内容。"
+            echo "::error::Subconverter 可执行文件未找到。请确认文件已上传到仓库根目录，且路径为 $SUB_EXEC_FINAL 或 subconverter/subconverter。"
             exit 1
           fi
 
+          # 3. 授权执行
           chmod +x "$SUB_EXEC_FINAL"
-          echo "Subconverter 下载、解压并授权执行成功：$SUB_EXEC_FINAL"
+          echo "✅ Subconverter 已授权执行。"
 
       - name: 🏃 执行 Mihomo 测试脚本
         id: run-script
@@ -108,7 +108,6 @@ jobs:
             DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
             git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (本地转换)"
             
-            # 使用 --rebase 避免产生合并冲突
             git pull --rebase origin ${GITHUB_REF#refs/heads/} 
             git push
           else
