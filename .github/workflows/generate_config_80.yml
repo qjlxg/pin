@@ -1,0 +1,76 @@
+name: Generate and Push Trojan Links
+
+# ------------------------------------------
+# 触发事件配置
+# ------------------------------------------
+on:
+  # 1. 手动触发 (可从 Actions 页面点击 Run workflow 按钮运行)
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动运行的原因 (可选)'
+        required: false
+        default: 'Manual run via GitHub UI'
+
+  # 2. 定时运行 (UTC 01:00，相当于上海时区 09:00)
+  schedule:
+    - cron: '0 1 * * *' 
+
+  # 3. 文件变动自动运行
+  push:
+    branches:
+      - master # 确保这是您的主分支名称
+      - main   # 如果您的主分支是 main，请保留
+    paths:
+      # 监控以下文件的变动
+      - 'link80.txt'
+      - 'generate_config_80.py'
+      - '.github/workflows/generate_config_80.yml'
+
+# ------------------------------------------
+# 全局时区设置 (上海时区)
+# ------------------------------------------
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  generate_and_push:
+    # 使用最新的 Ubuntu 运行环境
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 步骤 1: 检出代码
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # 必须设置 token 和 fetch-depth，以便后续能够推送
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0 
+
+      # 步骤 2: 设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' 
+
+      # 步骤 3: 运行 Python 脚本生成链接文件
+      - name: Run Python Script to Generate Links
+        run: |
+          echo "Current time in Shanghai: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          python generate_config_80.py
+      # 步骤 4: 提交并推送文件变动 (解决上次无法推送的问题)
+      # 使用 stefanzweifel/git-auto-commit-action 自动处理差异和推送逻辑
+      - name: Commit files and Push Changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          # 仅监控并提交 trojan_links.txt 文件
+          file_pattern: 'trojan_links_80.txt'
+          # 设置提交信息
+          commit_message: '🤖 Auto-update: Generated trojan_links.txt'
+          # 推送到当前运行的分支
+          branch: ${{ github.ref_name }} 
+          # 设置推送者为 GitHub 官方 Bot
+          commit_user_name: 'github-actions[bot]'
+          commit_user_email: 'github-actions[bot]@users.noreply.github.com'
+          # 只有文件有实际变化时才提交
+          skip_if_no_change: true
