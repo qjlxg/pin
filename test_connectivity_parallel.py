@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定调试版：降低并发+增加超时+日志打印)
+# test_connectivity_parallel.py (最终解析修复版：解决 YAML unmarshal 致命错误)
 import os
 import sys
 import datetime
@@ -12,7 +12,6 @@ import time
 from urllib.parse import quote, unquote
 
 # --- 配置 ---
-# 已替换为用户指定的单个链接
 REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
 ]
@@ -24,10 +23,9 @@ TEST_URLS = [
     "http://www.microsoft.com",           
 ]
 
-# === 核心调试修改 1：降低并发，解决资源耗尽问题 ===
-MAX_WORKERS = 4 # 推荐从 4 开始测试。如果成功，可逐渐提高到 8 或 16。
-
-# === 核心调试修改 2：增加超时时间，解决 Mihomo 启动时间长的问题 ===
+# 核心调试设置：降低并发，解决资源耗尽问题
+MAX_WORKERS = 4 
+# 核心调试设置：增加超时时间，解决 Mihomo 启动时间长的问题
 NODE_TIMEOUT = 10 
 # 最大重试次数
 MAX_RETRIES = 2 
@@ -98,13 +96,48 @@ def test_single_node(node_link):
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
-        
+
+        # === 核心修复：手动解析链接并构造 Mihomo YAML 格式 ===
+        proxy_config_yaml = ""
+        protocol = node_link.split('://')[0].lower()
+
+        try:
+            if protocol == 'trojan':
+                # 匹配 trojan://password@host:port/ or trojan://password@host:port?params
+                match = re.search(r'trojan://([^@]+)@([^:/]+):(\d+)', node_link)
+                if match:
+                    password, server, port = match.groups()
+                    # 构造正确的 Mihomo YAML 代理定义 (Map结构)
+                    proxy_config_yaml = f"""
+  - name: {proxy_name_final}
+    type: trojan
+    server: {server}
+    port: {port}
+    password: {password}
+    # 默认 tls: true, skip-cert-verify: false
+"""
+                else:
+                    # 如果格式不匹配，则可能是一个格式复杂的 Trojan 链接，视为解析失败
+                    raise ValueError("Trojan 链接格式不符合标准解析要求。")
+            
+            # TODO: 如果未来需要支持 Vmess/SS/Vless，需要在此处添加对应的 base64/URL 解析逻辑
+
+            if not proxy_config_yaml:
+                # 如果解析失败（或遇到了其他未实现的协议），则打印错误并返回失败
+                print(f"\n❌ FATAL ERROR: 无法解析 {protocol.upper()} 链接到 Mihomo YAML 格式: {node_link[:50]}...")
+                return False, node_link
+
+        except Exception as e:
+            # 如果解析过程中出现异常，直接终止当前测试
+            print(f"\n❌ FATAL PARSE ERROR: 处理 {protocol.upper()} 链接失败: {e}")
+            return False, node_link
+
         yaml_content = f"""
 mixed-port: 7890
 external-controller: {API_HOST}:{api_port}
 secret: githubactions
 proxies:
-  - {node_link}
+{proxy_config_yaml}  # 插入正确的 YAML Map 结构
 proxy-groups:
   - name: {quote(proxy_name_final)} 
     type: select
@@ -121,7 +154,7 @@ proxy-groups:
             
         is_successful = False
         api_started = False
-        mihomo_log_content = "" # 用于存储日志内容
+        mihomo_log_content = "" 
 
         try:
             # 3. 启动 Mihomo 核心
@@ -171,27 +204,24 @@ proxy-groups:
             if is_successful:
                 return True, node_link 
                 
-        except Exception as e:
-            # 如果出现启动异常，记录错误
-            mihomo_log_content = f"启动异常: {e}"
+        except Exception:
             pass
             
         finally:
-            # === 核心调试修改 3：失败时打印 Mihomo 日志 ===
+            # 失败时打印 Mihomo 日志
             if not is_successful:
                 if os.path.exists(LOG_PATH):
                     try:
                         with open(LOG_PATH, 'r', encoding='utf-8') as f:
                             mihomo_log_content = f.read()
                         
-                        # 只在日志非空时打印，避免刷屏
                         if mihomo_log_content.strip():
                             print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
                             print(mihomo_log_content, file=sys.stderr)
                             print("-" * 50, file=sys.stderr)
                             
                     except Exception:
-                        pass # 忽略读取日志文件的错误
+                        pass 
 
             # 7. 清理
             if clash_process:
