@@ -1,10 +1,10 @@
-# test_connectivity_clash_api.py (已修复 Argument list too long 错误)
+# test_connectivity_clash_api.py (已修复 Argument list too long 和编码错误)
 import os
 import sys
 import datetime
 import pytz
 import re
-import base64 # 库保留，但不再用于编码整个订阅
+import base64 
 import json
 import subprocess
 import requests
@@ -64,14 +64,14 @@ def fetch_and_parse_nodes():
                 unique_nodes.add(cleaned_line)
 
     print(f"修复并过滤后，发现 {len(unique_nodes)} 个潜在节点链接。")
-    # ！！！ 直接返回原始节点字符串，不再 Base64 编码 ！！！
+    # 直接返回原始节点字符串
     raw_nodes_string = '\n'.join(unique_nodes)
     return raw_nodes_string 
 
 def convert_nodes_with_local_subconverter(raw_nodes_string):
     """
     通过本地 Subconverter 可执行文件将原始节点列表通过 stdin 转换为 Clash YAML。
-    此方法彻底解决了 Argument list too long 的错误。
+    此方法彻底解决了 Argument list too long 的错误和编码冲突错误。
     """
     print("--- 3. 正在调用本地 Subconverter 转换配置 (通过 stdin 输入) ---")
     
@@ -80,21 +80,20 @@ def convert_nodes_with_local_subconverter(raw_nodes_string):
         return False
 
     # 构建 Subconverter 命令行参数
-    # -r: 使用远程规则模板
-    # -e: 不对输出进行 Base64 编码
-    # -f: 从标准输入 (stdin) 读取节点数据
+    # -f text: 告诉 Subconverter 输入是 text 格式（raw 节点链接列表）
+    # -e false: 确保输出是可读的 YAML，而不是 Base64
     command = [
         LOCAL_SUB_EXECUTABLE,
         '-r', 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini', 
-        '-f', 'text', # 告诉 Subconverter 输入是 text 格式（raw 节点链接列表）
-        '-e', 'false', # 确保输出是可读的 YAML，而不是 Base64
+        '-f', 'text', 
+        '-e', 'false',
     ]
     
     try:
-        # ！！！ 核心修复：通过 input 参数传递节点数据 ！！！
+        # 核心修复：通过 input 参数传递字符串对象，text=True 会自动处理编码
         result = subprocess.run(
             command, 
-            input=raw_nodes_string.encode('utf-8'), # 将节点字符串编码为 bytes 传递给 stdin
+            input=raw_nodes_string, # 直接传递字符串 (str) 对象
             capture_output=True, 
             text=True, 
             check=True, 
@@ -131,8 +130,6 @@ def convert_nodes_with_local_subconverter(raw_nodes_string):
     except Exception as e:
         print(f"❌ 转换或保存配置失败: {e}", file=sys.stderr)
         return False
-
-# --- 以下函数保持不变 ---
 
 def start_clash():
     """启动 Mihomo 核心并等待 API 准备就绪。"""
