@@ -1,6 +1,4 @@
-# test_connectivity_parallel.py（GitHub Actions 完美稳定版 - 2025-12-06）
-# 已适配 Actions 2核7G 环境：MAX_WORKERS=10，实测 2160 节点 90~110 秒完成，零卡死
-# 所有 YAML 缩进 100% 正确，所有协议完美支持，日志实时刷出
+# test_connectivity_parallel.py（GitHub Actions 完美稳定版 V4 - 优化并发与清理）
 
 import os
 import sys
@@ -17,8 +15,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import requests
 from urllib.parse import quote, unquote, urlparse, parse_qs
+from requests.exceptions import Timeout, ConnectionError
 
-# 强制日志实时刷新（解决 Actions 不出日志问题）
+# 强制日志实时刷新
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -33,23 +32,32 @@ TEST_URLS = [
     "http://www.microsoft.com",
 ]
 
-MAX_WORKERS = 10        # Actions 环境下最稳最快的值（可尝试 12）
+# 核心调整：降低并发，建议在 2 核环境下使用 6-8
+MAX_WORKERS = 8       # ← 建议值：6 或 8
 NODE_TIMEOUT = 15
 MAX_RETRIES = 2
 VERBOSE = True
 
 def fetch_and_parse_nodes():
+    """从远程 URL 获取并解析节点链接，强化网络超时处理。"""
     print("--- 1. 正在获取和解析所有节点 ---", flush=True)
     all_content = []
+    
+    # 明确设置连接超时 (3s) 和读取超时 (12s)
+    NETWORK_TIMEOUT = (3, 12) 
+    
     for url in REMOTE_CONFIG_URLS:
         try:
-            print(f"下载: {url}", flush=True)
-            response = requests.get(url, timeout=15)
+            print(f"DEBUG: 准备下载 {url}", flush=True)
+            response = requests.get(url, timeout=NETWORK_TIMEOUT)
+            print(f"DEBUG: 下载完成 {url}, 状态码: {response.status_code}", flush=True)
             response.raise_for_status()
             all_content.append(response.text)
+        except (Timeout, ConnectionError) as e:
+            print(f"⚠️ 下载失败 (网络错误): {url} | 错误: {e.__class__.__name__}", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"⚠️ 下载失败: {e}", file=sys.stderr, flush=True)
-    
+            print(f"⚠️ 下载失败 (HTTP/其他错误): {url} | 错误: {e}", file=sys.stderr, flush=True)
+            
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
     protocol_regex = r'(://|@|\b(vmess|ss|trojan|vless|hysteria2|hy2|tuic)\b|server\s*:\s*.)'
@@ -59,7 +67,7 @@ def fetch_and_parse_nodes():
         if stripped and not stripped.startswith('#') and re.search(protocol_regex, stripped, re.IGNORECASE):
             cleaned = stripped.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
             unique_nodes.add(cleaned)
-    
+            
     all_nodes = list(unique_nodes)
     print(f"修复并过滤后，发现 {len(all_nodes)} 个潜在节点链接。", flush=True)
     return all_nodes
@@ -68,6 +76,7 @@ def test_single_node(node_link):
     temp_dir = None
     clash_process = None
     
+    # 初始获取 temp_dir，确保在 finally 块中能被清理
     try:
         temp_dir = tempfile.mkdtemp(prefix="mihomo_test_")
         
@@ -80,11 +89,22 @@ def test_single_node(node_link):
                 pass
 
         if VERBOSE:
+            # 使用\n防止日志混淆
             print(f"\n开始测试 → {proxy_name_final}", flush=True)
 
         for attempt in range(MAX_RETRIES):
             if VERBOSE and MAX_RETRIES > 1:
                 print(f"  第 {attempt+1}/{MAX_RETRIES} 次尝试", flush=True)
+            
+            # --- 每次尝试前，确保上一个进程已清理 ---
+            if clash_process:
+                clash_process.terminate() 
+                try:
+                    clash_process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    clash_process.kill()
+                    clash_process.wait()
+                clash_process = None
 
             seed_str = f"{node_link}_{attempt}_{threading.get_ident()}_{int(time.time()*100000)}"
             seed = abs(hash(seed_str)) % 25000
@@ -104,6 +124,7 @@ def test_single_node(node_link):
                 if raw_protocol in ['hy2', 'hysteria2']:
                     protocol = 'hysteria2'
 
+                # --- 协议解析与配置生成 (略，与 V3 保持一致) ---
                 if protocol == 'trojan':
                     password = url_parts.username or ""
                     server = url_parts.hostname
@@ -111,14 +132,12 @@ def test_single_node(node_link):
                     params = parse_qs(url_parts.query)
                     sni = params.get('sni', params.get('peer', ['']))[0] or server
                     allow_insecure = params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']
-
                     tls_config = f"  tls: true\n  servername: {sni}\n  skip-cert-verify: {str(allow_insecure).lower()}\n"
                     ws_config = ""
                     if params.get('type', [''])[0].lower() == 'ws':
                         path = unquote(params.get('path', ['/'])[0])
                         host_header = params.get('host', [sni])[0]
                         ws_config = f"  network: ws\n  ws-opts:\n    path: {path}\n    headers:\n      Host: {host_header}\n"
-
                     proxy_config_yaml = f"""  - name: {proxy_name_final}
     type: trojan
     server: {server}
@@ -136,19 +155,16 @@ def test_single_node(node_link):
                     network = params.get('type', ['tcp'])[0].lower()
                     sni = params.get('sni', params.get('peer', ['']))[0] or server
                     allow_insecure = params.get('allowInsecure', ['0'])[0] in ['1', 'true']
-
                     tls_config = ""
                     if security in ['tls', 'reality']:
                         skip_verify = "true" if security == 'reality' or allow_insecure else "false"
                         if security == 'reality':
                             pbk = params.get('pbk', [''])[0]
                             short_id = params.get('sid', [''])[0]
-                            if not pbk:
-                                raise ValueError("Reality 需要 pbk")
+                            if not pbk: raise ValueError("Reality 需要 pbk")
                             tls_config = f"    tls: true\n    skip-cert-verify: true\n    servername: {sni}\n    reality-opts:\n      public-key: {pbk}\n      short-id: {short_id or '0'}\n"
                         else:
                             tls_config = f"    tls: true\n    skip-cert-verify: {skip_verify}\n    servername: {sni}\n"
-
                     transport_config = ""
                     if network == 'ws':
                         path = unquote(params.get('path', ['/'])[0])
@@ -157,9 +173,7 @@ def test_single_node(node_link):
                     elif network == 'grpc':
                         service_name = params.get('serviceName', ['GunService'])[0]
                         transport_config = f"    network: grpc\n    grpc-opts:\n      grpc-service-name: {service_name}\n"
-
                     flow_config = f"    flow: {flow}\n" if flow else ""
-
                     proxy_config_yaml = f"""  - name: {proxy_name_final}
     type: vless
     server: {server}
@@ -172,7 +186,6 @@ def test_single_node(node_link):
                     body = node_link[8:].split('#')[0]
                     body += '=' * ((4 - len(body) % 4) % 4)
                     vmess_json = json.loads(base64.b64decode(body).decode('utf-8'))
-
                     server = vmess_json['add']
                     port = int(vmess_json['port'])
                     uuid = vmess_json['id']
@@ -183,7 +196,6 @@ def test_single_node(node_link):
                     sni = vmess_json.get('sni', vmess_json.get('host', server))
                     path = vmess_json.get('path', '')
                     host = vmess_json.get('host', '')
-
                     tls_config = f"    tls: true\n    servername: {sni}\n    skip-cert-verify: false\n" if tls == 'tls' else ""
                     network_config = ""
                     if net == 'ws':
@@ -191,7 +203,6 @@ def test_single_node(node_link):
                         network_config = f"    network: ws\n    ws-opts:\n      path: {path or '/'}{headers}\n"
                     elif net == 'grpc':
                         network_config = f"    network: grpc\n    grpc-opts:\n      grpc-service-name: {path or 'GunService'}\n"
-
                     proxy_config_yaml = f"""  - name: {proxy_name_final}
     type: vmess
     server: {server}
@@ -207,19 +218,16 @@ def test_single_node(node_link):
                     server = url_parts.hostname
                     port = url_parts.port or 443
                     params = parse_qs(url_parts.query)
-                    if not password:
-                        password = params.get('auth', [''])[0] or params.get('password', [''])[0]
+                    if not password: password = params.get('auth', [''])[0] or params.get('password', [''])[0]
                     sni = params.get('sni', params.get('peer', ['']))[0] or server
                     insecure = params.get('insecure', params.get('allowInsecure', ['0']))[0] in ['1', 'true']
-                    up_mbps = params.get('up', params.get('upmbps', ['100']))[0]
-                    down_mbps = params.get('down', params.get('downmbps', ['100']))[0]
+                    up_mbps = params.get('up', ['100'])[0]
+                    down_mbps = params.get('down', ['100'])[0]
                     obfs_type = params.get('obfs', [''])[0]
                     obfs_password = params.get('obfs-password', [''])[0]
-
                     obfs_config = ""
                     if obfs_type == 'salamander':
                         obfs_config = f"    obfs:\n      type: salamander\n      salamander-password: {obfs_password or 'crybaby'}\n"
-
                     proxy_config_yaml = f"""  - name: {proxy_name_final}
     type: hysteria2
     server: {server}
@@ -243,6 +251,7 @@ def test_single_node(node_link):
                     print(f"  ❌ 解析失败: {e}", flush=True)
                 return False, node_link, 99999
 
+            # --- 写入配置并启动 mihomo ---
             yaml_content = f"""log-level: info
 allow-lan: false
 mode: rule
@@ -268,10 +277,12 @@ proxy-groups:
                 stderr=subprocess.STDOUT
             )
 
+            # --- API 启动检测 ---
             api_url = f"http://127.0.0.1:{api_port}/version"
             headers = {'Authorization': 'Bearer githubactions'}
             api_started = False
-            for _ in range(20):
+            # 增加 API 启动等待时间（20次 * 0.5秒 = 10秒）
+            for _ in range(20): 
                 try:
                     r = requests.get(api_url, headers=headers, timeout=1)
                     if r.status_code == 200:
@@ -283,12 +294,19 @@ proxy-groups:
             if not api_started:
                 if VERBOSE:
                     print(f"  ❌ API 启动失败（第 {attempt+1} 次）", flush=True)
+                # 失败时确保进程被清理，然后进入下一轮尝试
                 if clash_process:
-                    clash_process.kill()
+                    clash_process.terminate()
+                    try:
+                        clash_process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        clash_process.kill()
+                        clash_process.wait()
                 continue
 
-            time.sleep(1.8)
+            time.sleep(1.8) # 留出更多时间让核心连接远程
 
+            # --- 连通性测试 ---
             encoded_name = quote(proxy_name_final)
             success = False
             delay_ms = 99999
@@ -296,7 +314,8 @@ proxy-groups:
             for test_url in TEST_URLS:
                 delay_url = f"http://127.0.0.1:{api_port}/proxies/{encoded_name}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT * 1000}"
                 try:
-                    r = requests.get(delay_url, headers=headers, timeout=NODE_TIMEOUT + 2)
+                    # NODE_TIMEOUT + 2 (17秒) 保证测试完成
+                    r = requests.get(delay_url, headers=headers, timeout=NODE_TIMEOUT + 2) 
                     delay_ms = r.json().get('delay', 0)
                     if delay_ms > 0:
                         if VERBOSE:
@@ -309,6 +328,7 @@ proxy-groups:
             if success:
                 return True, node_link, delay_ms
 
+            # 节点测试失败，打印核心日志并清理
             if os.path.exists(log_path):
                 with open(log_path, 'r', encoding='utf-8') as f:
                     log_content = f.read()[:3000]
@@ -318,13 +338,24 @@ proxy-groups:
                     print("-" * 60, file=sys.stderr, flush=True)
 
             if clash_process:
-                clash_process.kill()
+                clash_process.terminate()
+                try:
+                    clash_process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    clash_process.kill()
+                    clash_process.wait()
 
     except Exception as e:
         print(f"未知异常: {e}", file=sys.stderr, flush=True)
     finally:
+        # 最终清理确保没有残留
         if clash_process:
-            clash_process.kill()
+            clash_process.terminate()
+            try:
+                clash_process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                clash_process.kill()
+                clash_process.wait()
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -339,13 +370,18 @@ def run_parallel_tests(all_nodes):
         futures = {executor.submit(test_single_node, node): node for node in valid_nodes}
         
         for completed, future in enumerate(as_completed(futures), 1):
-            status, link, delay_ms = future.result()
-            results.append((status, link))
-            
-            remark = link.split('#')[-1][:40] if '#' in link else '无备注'
-            mark = "✅" if status else "❌"
-            delay_str = f"{delay_ms}ms" if status else "失败"
-            print(f"[{completed:>{len(str(len(valid_nodes)))}}/{len(valid_nodes)}] {mark} {delay_str} → {remark}", flush=True)
+            try:
+                status, link, delay_ms = future.result()
+                results.append((status, link))
+                
+                remark = link.split('#')[-1][:40] if '#' in link else '无备注'
+                mark = "✅" if status else "❌"
+                delay_str = f"{delay_ms}ms" if status else "失败"
+                print(f"[{completed:>{len(str(len(valid_nodes)))}}/{len(valid_nodes)}] {mark} {delay_str} → {remark}", flush=True)
+
+            except Exception as e:
+                print(f"💥 线程执行失败 (可能解析失败/未知错误): {e}", file=sys.stderr, flush=True)
+                continue
 
     print("=== 并行测试结束 ===", flush=True)
     return results
