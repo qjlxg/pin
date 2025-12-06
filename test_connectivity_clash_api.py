@@ -1,4 +1,4 @@
-# test_connectivity_clash_api.py (已修复 Argument list too long 和编码错误)
+# test_connectivity_clash_api.py (已移除 Subconverter 转换超时限制)
 import os
 import sys
 import datetime
@@ -71,7 +71,6 @@ def fetch_and_parse_nodes():
 def convert_nodes_with_local_subconverter(raw_nodes_string):
     """
     通过本地 Subconverter 可执行文件将原始节点列表通过 stdin 转换为 Clash YAML。
-    此方法彻底解决了 Argument list too long 的错误和编码冲突错误。
     """
     print("--- 3. 正在调用本地 Subconverter 转换配置 (通过 stdin 输入) ---")
     
@@ -80,8 +79,6 @@ def convert_nodes_with_local_subconverter(raw_nodes_string):
         return False
 
     # 构建 Subconverter 命令行参数
-    # -f text: 告诉 Subconverter 输入是 text 格式（raw 节点链接列表）
-    # -e false: 确保输出是可读的 YAML，而不是 Base64
     command = [
         LOCAL_SUB_EXECUTABLE,
         '-r', 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini', 
@@ -90,14 +87,15 @@ def convert_nodes_with_local_subconverter(raw_nodes_string):
     ]
     
     try:
-        # 核心修复：通过 input 参数传递字符串对象，text=True 会自动处理编码
+        # 核心修复：移除 timeout 参数，让 Subconverter 运行直到完成
+        print("Subconverter 转换中... (此过程可能耗时较长，请耐心等待)")
         result = subprocess.run(
             command, 
-            input=raw_nodes_string, # 直接传递字符串 (str) 对象
+            input=raw_nodes_string, 
             capture_output=True, 
             text=True, 
             check=True, 
-            timeout=120
+            # timeout=None (默认为无限制，或显式移除 timeout 参数)
         )
         yaml_content = result.stdout
         
