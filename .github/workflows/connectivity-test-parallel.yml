@@ -1,17 +1,17 @@
-# .github/workflows/connectivity-test-parallel.yml
-name: 测试 (并行加速)
+# .github/workflows/connectivity-test-clash.yml
+name: 测试 (Clash 专业连通性)
 
 on:
   # 1. 允许手动运行 (无输入参数)
   workflow_dispatch:
   
-  # 2. 脚本变动时自动触发
+  # 2. 脚本或工作流变动时自动触发
   push:
     branches:
-      - main # 请根据您的主分支名称进行修改
+      - main
     paths:
-      - 'test_connectivity_parallel.py'
-      - '.github/workflows/connectivity-test-parallel.yml'
+      - 'test_connectivity_clash.py'
+      - '.github/workflows/connectivity-test-clash.yml'
       
 jobs:
   test_and_push:
@@ -41,17 +41,17 @@ jobs:
         run: |
           pip install requests pytz
           
-      - name: 🏃 执行并行连通性测试脚本
+      - name: 🏃 执行 Clash 连通性测试脚本
         id: run-script
         run: |
           # 运行脚本
-          python test_connectivity_parallel.py | tee run_output.txt
+          python test_connectivity_clash.py | tee run_output.txt
           
           # 从脚本输出中提取 REPORT_PATH 变量
           REPORT_PATH=$(grep 'REPORT_PATH=' run_output.txt | cut -d'=' -f2)
           echo "REPORT_PATH=$REPORT_PATH" >> $GITHUB_OUTPUT
         
-      - name: ⬆️ 推送测试结果到仓库 (已修复冲突问题)
+      - name: ⬆️ 推送测试结果到仓库
         if: steps.run-script.outputs.REPORT_PATH != ''
         run: |
           REPORT_PATH=${{ steps.run-script.outputs.REPORT_PATH }}
@@ -68,13 +68,10 @@ jobs:
           
           if ! git diff-index --quiet HEAD; then
             DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
-            git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (上海时区)"
+            git commit -m "自动测试: Clash 可用节点报告 ${DATE_SHANGHAI} (上海时区)"
             
-            # === 关键修复：在推送前拉取远程代码并变基，解决 'rejected' 错误 ===
-            # 使用 --rebase 避免产生合并提交，保持历史清晰
+            # 在推送前拉取远程代码并变基
             git pull --rebase origin main 
-            # 如果您的主分支不是 main，请修改上面这一行
-            # =====================================================================
             
             git push
             echo "✅ 成功推送了新报告: $REPORT_PATH"
