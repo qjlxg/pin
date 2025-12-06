@@ -19,7 +19,7 @@ jobs:
   test_and_push:
     runs-on: ubuntu-latest
     
-    # 授予写入权限，允许机器人推送新的结果文件
+    # 授予写入权限
     permissions:
       contents: write 
     
@@ -57,7 +57,7 @@ jobs:
           # 脚本期望的最终路径
           SUB_EXEC_FINAL="./subconverter-linux64"
           
-          # 1. 检查是否已存在于期望路径 (如果用户之前重命名成功)
+          # 1. 检查是否已存在于期望路径
           if [ -f "$SUB_EXEC_FINAL" ]; then
             echo "✅ Subconverter 已位于期望路径。"
           
