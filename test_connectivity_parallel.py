@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定运行版：修复 Trojan-WS 解析)
+# test_connectivity_parallel.py (最终稳定运行版：修复 Trojan-WS 解析和线程端口冲突)
 import os
 import sys
 import datetime
@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import requests
 import time
-from urllib.parse import quote, unquote, urlparse, parse_qs # <-- 新增 urlparse 和 parse_qs
+import threading # <-- 新增：用于获取唯一的线程 ID
+from urllib.parse import quote, unquote, urlparse, parse_qs 
 
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
@@ -75,14 +76,21 @@ def test_single_node(node_link):
         clash_process = None
         
         try:
-            # 确保每个线程/尝试都有独特的端口和文件
-            unique_id = f"{os.getpid()}_{attempt}_{int(time.time()*1000)}" 
-            port_seed = os.getpid() % 100 + hash(node_link) % 1000 + attempt 
+            # === 核心修复：使用线程ID生成端口，解决并发冲突 ===
+            thread_id = threading.get_ident()
             
-            # 动态分配 API 端口和代理端口
-            api_port = 19190 + port_seed 
-            PROXY_PORT = 7890 + port_seed
+            # 结合线程ID、节点链接哈希和尝试次数，生成更唯一的种子
+            # 使用较大的乘数，确保端口号的间隔足够大
+            port_seed = (thread_id % 10000) * 1000 + (hash(node_link) % 1000) + attempt 
+            
+            # 使用高位端口范围，防止与系统默认服务冲突
+            api_port = 25000 + port_seed 
+            PROXY_PORT = 15000 + port_seed
+            
+            unique_id = f"{thread_id}_{attempt}" 
+            # ===============================================
         except:
+            # 回退逻辑
             unique_id = f"fallback_{attempt}_{int(time.time()*1000)}"
             api_port = 19190 + attempt
             PROXY_PORT = 7890 + attempt
@@ -107,7 +115,7 @@ def test_single_node(node_link):
         # 设定一个不会与节点名冲突的群组名称
         GROUP_NAME = "NODE_TEST_GROUP" 
 
-        # === 核心修复：手动解析链接并构造 Mihomo YAML 格式 (支持 Trojan-WS) ===
+        # --- 核心：手动解析链接并构造 Mihomo YAML 格式 (支持 Trojan-WS) ---
         proxy_config_yaml = ""
 
         try:
@@ -121,7 +129,8 @@ def test_single_node(node_link):
                 port = url_parts.port
                 
                 if not (password and server and port):
-                    raise ValueError("Trojan link missing essential components.")
+                    # 基础信息缺失，跳过
+                    return False, node_link 
 
                 # 解析查询参数
                 params = parse_qs(url_parts.query)
@@ -140,7 +149,8 @@ def test_single_node(node_link):
                 
                 # 处理 allowlnsecure/allowinsecure 参数 (跳过证书验证)
                 # 注意： Mihomo 使用 skip-cert-verify: true
-                if params.get('allowinsecure', params.get('allowlnsecure', [''])[0]).lower() in ['1', 'true']:
+                allow_insecure_param = params.get('allowinsecure', params.get('allowlnsecure', [''])[0])
+                if allow_insecure_param.lower() in ['1', 'true']:
                      tls_config = tls_config.replace("skip-cert-verify: false", "skip-cert-verify: true")
                 
                 # --- WebSocket 配置 ---
@@ -169,13 +179,11 @@ def test_single_node(node_link):
 {tls_config}
 {ws_config}
 """
-
-            # TODO: 如果需要支持 Vmess/Vless 等，应在此处添加对应的解析逻辑
-
             if not proxy_config_yaml:
                 return False, node_link # 解析失败或协议不支持
 
         except Exception as e:
+            # 捕获并记录解析错误，不中断整个流程
             print(f"\n❌ FATAL PARSE ERROR (Trojan): 处理 {node_link[:50]}... 失败: {e}", file=sys.stderr)
             return False, node_link # 解析异常，返回失败
 
@@ -186,7 +194,7 @@ mixed-port: {PROXY_PORT}
 external-controller: {API_HOST}:{api_port}
 secret: githubactions
 proxies:
-{proxy_config_yaml}  # 插入完整的 YAML Map 结构
+{proxy_config_yaml}
 proxy-groups:
   - name: {GROUP_NAME}
     type: select
@@ -215,7 +223,8 @@ proxy-groups:
             api_url = f"http://{API_HOST}:{api_port}/version"
             headers = {'Authorization': 'Bearer githubactions'}
             
-            for _ in range(5): 
+            # 延长等待次数和每次等待时间，确保启动更稳定
+            for _ in range(10): 
                 try:
                     response = requests.get(api_url, headers=headers, timeout=0.5)
                     if response.status_code == 200:
@@ -238,7 +247,8 @@ proxy-groups:
                 api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
-                    response = requests.get(api_delay_url, headers=headers, timeout=NODE_TIMEOUT)
+                    # 延长 API 测试的超时时间 (NODE_TIMEOUT)
+                    response = requests.get(api_delay_url, headers=headers, timeout=NODE_TIMEOUT + 2) 
                     response.raise_for_status()
                     delay_data = response.json()
                     
