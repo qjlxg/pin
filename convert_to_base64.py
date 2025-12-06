@@ -23,10 +23,11 @@ EXCLUDE_KEYWORDS = [
     "t.me", "api.w.org",
 ]
 
-# --- Proxy Parsing Functions (保持不变) ---
+# --- Proxy Parsing Functions ---
 def generate_proxy_fingerprint(proxy_data):
     """
     根据代理的核心连接信息生成一个唯一的哈希指纹。
+    修正：为 Vmess/Trojan 添加 servername (SNI) 以区分同一服务器下的不同节点。
     """
     try:
         p_type = str(proxy_data.get('type', '')).lower()
@@ -38,8 +39,14 @@ def generate_proxy_fingerprint(proxy_data):
         if p_type == 'vmess':
             fingerprint_parts.append(str(proxy_data.get('uuid', '')))
             fingerprint_parts.append(str(proxy_data.get('alterId', '')))
+            # --- 修正 1：添加 servername ---
+            if proxy_data.get('servername'):
+                 fingerprint_parts.append(str(proxy_data['servername']))
         elif p_type == 'trojan':
             fingerprint_parts.append(str(proxy_data.get('password', '')))
+            # --- 修正 1：添加 servername ---
+            if proxy_data.get('servername'):
+                 fingerprint_parts.append(str(proxy_data['servername']))
         elif p_type == 'ss':
             fingerprint_parts.append(str(proxy_data.get('password', '')))
             fingerprint_parts.append(str(proxy_data.get('cipher', '')))
@@ -84,7 +91,16 @@ def parse_vmess(vmess_url):
             proxy['servername'] = servername
         if skip_cert_verify:
             proxy['skip-cert-verify'] = True
-
+            
+        # 修正：VMess的WebSocket/gRPC配置需要转换成Clash格式
+        if network == 'ws' and 'path' in config:
+            proxy['ws-opts'] = {'path': config.get('path', '/')}
+            if config.get('host'):
+                proxy['ws-opts']['headers'] = {'Host': config['host']}
+        
+        if network == 'grpc':
+            proxy['grpc-opts'] = {'grpc-service-name': config.get('path', '')}
+            
         return proxy
     except Exception as e:
         # print(f"解析 Vmess 链接失败: {vmess_url[:50]}...，原因: {e}")
@@ -102,7 +118,10 @@ def parse_trojan(trojan_url):
         tls = True
         skip_cert_verify = params.get('allowInsecure', ['0'])[0] == '1'
         servername = params.get('sni', [server])[0]
-
+        
+        # --- 修正 2：添加 WebSocket/gRPC 解析 ---
+        network = params.get('type', ['tcp'])[0] # 提取网络类型
+        
         proxy = {
             'name': name,
             'type': 'trojan',
@@ -110,16 +129,36 @@ def parse_trojan(trojan_url):
             'port': port,
             'password': password,
             'tls': tls,
+            'network': network, # 添加网络类型
         }
+        
         if servername:
             proxy['servername'] = servername
         if skip_cert_verify:
             proxy['skip-cert-verify'] = True
+            
+        if network == 'ws':
+            ws_path = params.get('path', ['/'])[0]
+            ws_host = params.get('host', [servername])[0] # 默认使用 SNI 作为 Host
+            proxy['ws-opts'] = {
+                'path': unquote(ws_path),
+                'headers': {
+                    'Host': ws_host
+                }
+            }
+        
+        if network == 'grpc':
+            proxy['grpc-opts'] = {'grpc-service-name': params.get('path', [''])[0]}
+        # --- 修正 2 结束 ---
 
         return proxy
     except Exception as e:
         # print(f"解析 Trojan 链接失败: {trojan_url[:50]}...，原因: {e}")
         return None
+
+# parse_shadowsocks, parse_hysteria2, test_tcp_connectivity, _parse_single_proxy_link, 
+# _try_parse_yaml_proxies, _try_parse_v2rayn_json_proxies, _parse_proxies_from_decoded_text
+# 及其余代码保持不变 (为简洁省略，请在您的实际脚本中保留它们)
 
 def parse_shadowsocks(ss_url):
     try:
@@ -300,13 +339,9 @@ def _parse_proxies_from_decoded_text(decoded_text, url_for_logging):
         print(f"  --- URL: {url_for_logging} Identified as plaintext, {parsed_line_count} proxy nodes parsed ---")
     return proxies
 
-# --- Fetch and Decode URLs (主要修改此函数) ---
+# --- Fetch and Decode URLs (保持不变) ---
 def fetch_and_decode_urls_to_clash_proxies(urls, enable_connectivity_test=True):
     all_raw_proxies = []
-    
-    # ---------------------------------------------
-    # 核心修改：只处理输入的 URL 列表，不再处理文件更新逻辑
-    # ---------------------------------------------
 
     for url_idx, url in enumerate(urls):
         url = url.strip()
@@ -401,6 +436,7 @@ def fetch_and_decode_urls_to_clash_proxies(urls, enable_connectivity_test=True):
             continue
         fingerprint = generate_proxy_fingerprint(proxy_dict)
         if fingerprint:
+            # 修正 3：使用新的指纹进行去重，现在具有不同 SNI/Host 的节点将被保留。
             unique_proxies_for_test[fingerprint] = proxy_dict
 
     proxies_to_test_list = list(unique_proxies_for_test.values())
@@ -425,7 +461,8 @@ def fetch_and_decode_urls_to_clash_proxies(urls, enable_connectivity_test=True):
                     is_reachable = future.result()
                     if is_reachable:
                         original_name = proxy_dict.get('name', f"{proxy_dict.get('type', 'UNKNOWN').upper()}-{proxy_dict.get('server', 'unknown')}")
-                        short_fingerprint = generate_proxy_fingerprint(proxy_dict)[:6]
+                        # 修正 4：确保为去重后的节点重新生成指纹，以添加到名称中
+                        short_fingerprint = generate_proxy_fingerprint(proxy_dict)[:6] 
                         max_name_len = 50
 
                         if len(original_name) > max_name_len - (len(short_fingerprint) + 1):
@@ -460,24 +497,17 @@ def fetch_and_decode_urls_to_clash_proxies(urls, enable_connectivity_test=True):
     # 返回成功的代理列表和空的 URL 列表（因为我们不再更新 URL 文件）
     return final_filtered_proxies, [] 
 
-# --- GitHub API Helpers (移除或简化) ---
-# 移除所有 GitHub API 相关的函数 get_github_file_content 和 update_github_file_content
-
-# --- Main Function (主要修改) ---
+# --- Main Function ---
 def main():
-    # 移除 BOT_TOKEN 和 URL_LIST_REPO_API 的环境变量获取
-    # bot_token = os.environ.get("BOT")
-    # url_list_repo_api = os.environ.get("URL_LIST_REPO_API")
-
     # 直接使用硬编码的 URL
     urls = [SUBSCRIPTION_URL]
     print(f"使用硬编码的订阅链接: {SUBSCRIPTION_URL}")
 
     enable_connectivity_test = os.environ.get("ENABLE_CONNECTIVITY_TEST", "true").lower() == "true"
 
-    # fetch_and_decode_urls_to_clash_proxies 函数现在只返回代理列表，第二个返回值是空的
     all_parsed_proxies, _ = fetch_and_decode_urls_to_clash_proxies(urls, enable_connectivity_test)
 
+    # 您的 Clash 配置保持不变，它将使用 all_parsed_proxies 列表
     clash_config = {
         'port': 7890,
         'socks-port': 7891,
@@ -564,12 +594,6 @@ def main():
         f.write(final_base64_encoded)
     print(f"Base64 encoded Clash YAML configuration successfully written to {OUTPUT_BASE64_FILE}")
     
-    # 移除更新 GitHub 文件的逻辑
-    # new_url_list_content = "\n".join(sorted(list(set(successful_urls_list))))
-    # if new_url_list_content.strip() != url_content.strip():
-    # ... (removed GitHub update logic)
-    # else:
-    #     print("url.txt file content unchanged, no update needed.")
 
 if __name__ == "__main__":
     main()
