@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定运行版：修复代理组循环)
+# test_connectivity_parallel.py (最终稳定运行版：修复端口冲突)
 import os
 import sys
 import datetime
@@ -75,11 +75,17 @@ def test_single_node(node_link):
         clash_process = None
         
         try:
+            # 确保每个线程/尝试都有独特的端口和文件
             unique_id = f"{os.getpid()}_{attempt}_{int(time.time()*1000)}" 
-            api_port = 19190 + os.getpid() % 100 + hash(node_link) % 1000 + attempt 
+            port_seed = os.getpid() % 100 + hash(node_link) % 1000 + attempt 
+            
+            # === 核心修复 1：动态分配 API 端口和代理端口 ===
+            api_port = 19190 + port_seed 
+            PROXY_PORT = 7890 + port_seed
         except:
             unique_id = f"fallback_{attempt}_{int(time.time()*1000)}"
             api_port = 19190 + attempt
+            PROXY_PORT = 7890 + attempt
         
         CLASH_EXEC = "mihomo-linux-amd64"
         CONFIG_PATH = f"config_{unique_id}.yaml"
@@ -88,10 +94,11 @@ def test_single_node(node_link):
         proxy_name_final = node_link.split('://')[0].upper() # 默认名称
         
         # 1. 构造配置 - 确保代理名称安全
-        proxy_name_match = re.search(r'name=([^&]+)', node_link)
-        if proxy_name_match:
+        # 优先从 # 标签中提取名称
+        proxy_label_match = re.search(r'#(.+)', node_link)
+        if proxy_label_match:
             try:
-                raw_name = unquote(proxy_name_match.group(1).split('#')[-1])
+                raw_name = unquote(proxy_label_match.group(1))
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
@@ -99,16 +106,17 @@ def test_single_node(node_link):
         # 设定一个不会与节点名冲突的群组名称
         GROUP_NAME = "NODE_TEST_GROUP" 
 
-        # === 核心修复：手动解析链接并构造 Mihomo YAML 格式 ===
+        # === 核心修复 2：手动解析链接并构造 Mihomo YAML 格式 (Trojan) ===
         proxy_config_yaml = ""
         protocol = node_link.split('://')[0].lower()
 
         try:
             if protocol == 'trojan':
+                # 匹配 trojan://password@host:port
                 match = re.search(r'trojan://([^@]+)@([^:/]+):(\d+)', node_link)
                 if match:
                     password, server, port = match.groups()
-                    # 构造正确的 Mihomo YAML 代理定义，并显式设置 tls: true (Trojan 默认需要)
+                    # 注意：您的链接包含额外的 ws, sni 等参数，但基础解析能让 Mihomo 尝试连接
                     proxy_config_yaml = f"""
   - name: {proxy_name_final}
     type: trojan
@@ -118,21 +126,17 @@ def test_single_node(node_link):
     tls: true
 """
                 else:
-                    raise ValueError("Trojan 链接格式不符合标准解析要求。")
-            
-            # 由于您的链接主要来自 trojan_links.txt，我们暂时只实现 Trojan 的解析。
-            # 如需支持 Vmess/SS/Vless/Hysteria，需要在此处添加对应的解析逻辑。
+                    return False, node_link 
 
             if not proxy_config_yaml:
-                # 如果解析失败，则可能是链接格式复杂或协议未实现
-                return False, node_link # 直接返回失败
+                return False, node_link 
 
         except Exception:
-            return False, node_link # 解析异常，返回失败
+            return False, node_link 
 
-        # === 核心修复：代理组使用固定名称，避免循环引用 ===
+        # === 核心修复 3：YAML 配置使用动态端口 ===
         yaml_content = f"""
-mixed-port: 7890
+mixed-port: {PROXY_PORT} 
 external-controller: {API_HOST}:{api_port}
 secret: githubactions
 proxies:
@@ -184,10 +188,10 @@ proxy-groups:
             time.sleep(1) 
             
             # 5. --- 多目标 URL 连通性测试 ---
-            # 直接对单个节点进行延迟测试
             encoded_proxy_name_for_delay = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
+                # Mihomo API 延迟测试
                 api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
@@ -216,7 +220,6 @@ proxy-groups:
                             mihomo_log_content = f.read()
                         
                         if mihomo_log_content.strip():
-                            # 只打印前 2000 个字符以避免日志过长
                             print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
                             print(mihomo_log_content[:2000], file=sys.stderr)
                             print("..." if len(mihomo_log_content) > 2000 else "", file=sys.stderr)
