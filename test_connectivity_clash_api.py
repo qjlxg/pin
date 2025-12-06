@@ -1,270 +1,256 @@
-# test_connectivity_clash_api.py (最终无限制版，使用本地 INI 模板)
+# test_connectivity_parallel.py (最终版本 - 并行测试)
 import os
 import sys
 import datetime
 import pytz
 import re
-import base64 
-import json
+import base64
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import requests
 import time
 
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt",
-
+    "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
+   
 ]
 
-# *** 核心：本地可执行文件路径 ***
-LOCAL_MIHOMO_FILENAME = "mihomo-linux-amd64" 
-LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" 
-
-# *** 核心：自定义 INI 文件路径 ***
-LOCAL_INI_PATH = "./my_custom_clash_template.ini" 
-
-CLASH_EXECUTABLE = f"./{LOCAL_MIHOMO_FILENAME}"
-CLASH_CONFIG_PATH = "mihomo_config.yaml"
-CLASH_LOG_PATH = "mihomo.log"
-API_HOST = "127.0.0.1"
-API_PORT = 19090
+# 最大并行工作线程数 (推荐 32 或更高)
+MAX_WORKERS = 32
+# 测试 URL
 TEST_URL = "http://www.google.com/generate_204"
+# 每个节点的连接超时时间 (秒)
+NODE_TIMEOUT = 10 
 
 # --- 核心功能 ---
 
-def download_clash_core():
-    """检查本地 Mihomo 核心文件是否存在。"""
-    print("--- 1. 正在检查本地 Mihomo 核心 ---")
-    
-    if not os.path.exists(CLASH_EXECUTABLE):
-        print(f"❌ 错误：本地 Mihomo 核心文件未找到，路径：{CLASH_EXECUTABLE}", file=sys.stderr)
-        return False
-        
-    print(f"✅ Mihomo 核心检查成功：{CLASH_EXECUTABLE}")
-    return True
-
 def fetch_and_parse_nodes():
-    """下载并解析所有潜在的节点链接，返回原始文本格式的节点字符串。"""
-    print("--- 2. 正在获取和解析所有节点 ---")
+    """
+    下载远程文件，解析出潜在的节点链接。
+    """
+    print("--- 1. 正在获取和解析所有节点 ---")
+    
     all_content = []
+    
+    # 下载远程文件
     for url in REMOTE_CONFIG_URLS:
         try:
-            response = requests.get(url, timeout=10)
+            print(f"下载: {url}")
+            response = requests.get(url, timeout=15)
             response.raise_for_status()
             all_content.append(response.text)
-        except:
-            print(f"⚠️ 警告: 下载 {url} 失败。", file=sys.stderr)
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ 警告: 下载 {url} 失败: {e}", file=sys.stderr)
 
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
+    
     for line in all_lines:
         stripped_line = line.strip()
         if stripped_line and not stripped_line.startswith('#'):
             # 过滤主流协议链接
             if re.search(r'(://|@|\b(vmess|ss|trojan|vless)\b|server\s*:\s*.)', stripped_line, re.IGNORECASE):
+                # 修复重复协议前缀，例如 vmess://vmess://
                 cleaned_line = stripped_line.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
                 unique_nodes.add(cleaned_line)
 
-    print(f"修复并过滤后，发现 {len(unique_nodes)} 个潜在节点链接。")
-    # 直接返回原始节点字符串
-    raw_nodes_string = '\n'.join(unique_nodes)
-    return raw_nodes_string 
+    all_nodes = list(unique_nodes)
+    print(f"修复并过滤后，发现 {len(all_nodes)} 个潜在节点链接。")
+    return all_nodes
 
-def convert_nodes_with_local_subconverter(raw_nodes_string):
+def test_single_node(node_link):
     """
-    通过本地 Subconverter 可执行文件将原始节点列表通过 stdin 转换为 Clash YAML。
-    已移除超时限制。
+    使用 Clash/Mihomo 核心作为子进程，测试单个节点连通性。
+    此方法比直接使用 requests 库更准确，因为它能处理复杂的 Vmess/Trojan/VLESS 协议。
     """
-    print("--- 3. 正在调用本地 Subconverter 转换配置 (通过 stdin 输入) ---")
     
-    if not os.path.exists(LOCAL_SUB_EXECUTABLE):
-        print(f"❌ 错误：本地 Subconverter 文件未找到。", file=sys.stderr)
-        return False
-        
-    if not os.path.exists(LOCAL_INI_PATH):
-        print(f"❌ 错误：自定义 INI 文件未找到，路径：{LOCAL_INI_PATH}", file=sys.stderr)
-        return False
-
-    # 构建 Subconverter 命令行参数
-    command = [
-        LOCAL_SUB_EXECUTABLE,
-        '-r', f'file://{LOCAL_INI_PATH}', # <--- 使用本地 INI 模板
-        '-f', 'text', 
-        '-e', 'false',
-    ]
-    
+    # 随机生成一个端口用于 Mihomo API
     try:
-        print("Subconverter 转换中... (已移除超时限制)")
-        result = subprocess.run(
-            command, 
-            input=raw_nodes_string, # 直接传递字符串 (str) 对象，无超时限制
-            capture_output=True, 
-            text=True, 
-            check=True, 
-            # timeout=None (默认为无限制)
-        )
-        yaml_content = result.stdout
+        api_port = 19190 + os.getpid() % 100 
+    except:
+        api_port = 19190 # Fallback 
         
-        if 'proxy-groups' not in yaml_content:
-            raise ValueError("Subconverter 输出似乎不是有效的 Clash YAML 配置。")
-            
-        # --- 注入 Mihomo API 配置并优化测试 ---
-        
-        # 注入本地外部控制器
-        controller_config = f"external-controller: {API_HOST}:{API_PORT}\nsecret: githubactions\n"
-        yaml_content = yaml_content.replace("external-controller: 127.0.0.1:9090", controller_config) 
-        if controller_config not in yaml_content:
-             yaml_content = controller_config + "\n" + yaml_content
+    CLASH_EXEC = "mihomo-linux-amd64"
+    CONFIG_PATH = f"config_{api_port}.yaml"
+    LOG_PATH = f"mihomo_{api_port}.log"
+    API_HOST = "127.0.0.1"
+    
+    # 1. 构造一个包含单个节点的 Clash YAML 配置
+    yaml_content = f"""
+mixed-port: 7890
+external-controller: {API_HOST}:{api_port}
+secret: githubactions
+proxies:
+  - {node_link}
+proxy-groups:
+  - name: TEST_GROUP
+    type: select
+    proxies:
+      - {node_link.split('://')[0].upper()} # 使用节点类型作为名称，例如 SS/VMESS/TROJAN
+      
+"""
+    
+    # 尝试解析节点名称以获得代理名
+    proxy_name_match = re.search(r'name=([^&]+)', node_link)
+    if proxy_name_match:
+        proxy_name = requests.utils.unquote(proxy_name_match.group(1).split('#')[-1])
+        yaml_content = yaml_content.replace(f"- {node_link.split('://')[0].upper()}", f"- {proxy_name}")
 
-        # 将配置中所有 'select' 类型的组改为 'url-test' 以触发测试
-        yaml_content = re.sub(r'type:\s*select', 'type: url-test', yaml_content)
-        yaml_content = yaml_content.replace("url: http://www.gstatic.com/generate_204", f"url: {TEST_URL}")
-        yaml_content = yaml_content.replace("interval: 3600", "interval: 300") 
-        
-        with open(CLASH_CONFIG_PATH, 'w', encoding='utf-8') as f:
+    # 替换代理组中的代理名称
+    proxy_name_final = yaml_content.split('proxies:')[1].split('\n')[1].strip().replace('- ', '')
+    yaml_content = yaml_content.replace('TEST_GROUP', proxy_name_final)
+
+    # 2. 保存配置
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
-        
-        print(f"✅ Clash 配置本地转换并保存成功到: {CLASH_CONFIG_PATH}")
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Subconverter 执行失败 (错误代码: {e.returncode})", file=sys.stderr)
-        print(f"Subconverter 错误输出: {e.stderr}", file=sys.stderr)
-        return False
     except Exception as e:
-        print(f"❌ 转换或保存配置失败: {e}", file=sys.stderr)
-        return False
-
-def start_clash():
-    """启动 Mihomo 核心并等待 API 准备就绪。"""
-    print(f"--- 4. 正在启动 Mihomo 核心 ({CLASH_EXECUTABLE}) ---")
+        print(f"❌ 错误: 写入配置失败: {e}", file=sys.stderr)
+        return False, node_link
     
-    clash_process = subprocess.Popen(
-        [CLASH_EXECUTABLE, '-f', CLASH_CONFIG_PATH, '-d', '.'],
-        stdout=open(CLASH_LOG_PATH, 'w'), 
-        stderr=subprocess.STDOUT
-    )
-    
-    api_url = f"http://{API_HOST}:{API_PORT}/version"
-    headers = {'Authorization': 'Bearer githubactions'}
-    
-    print("等待 Mihomo API 启动...")
-    for _ in range(20): 
-        try:
-            response = requests.get(api_url, headers=headers, timeout=0.5)
-            if response.status_code == 200:
-                print("✅ Mihomo API 启动成功。")
-                return clash_process
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(0.5)
-
-    print("❌ Mihomo API 启动超时或失败。请检查日志。")
-    clash_process.terminate()
-    return None
-
-def run_clash_test(clash_process):
-    """通过 Mihomo API 触发 URL 测试并获取结果。"""
-    print("--- 5. 正在执行 URL 连通性测试 ---")
-    
-    api_group_names_url = f"http://{API_HOST}:{API_PORT}/configs"
-    headers = {'Authorization': 'Bearer githubactions'}
-    
+    clash_process = None
     try:
-        response = requests.get(api_group_names_url, headers=headers, timeout=10)
-        config_data = response.json()
+        # 3. 启动 Mihomo 核心
+        clash_process = subprocess.Popen(
+            [f"./{CLASH_EXEC}", '-f', CONFIG_PATH, '-d', '.'],
+            stdout=open(LOG_PATH, 'w'), 
+            stderr=subprocess.STDOUT
+        )
         
-        test_group_name = None
-        # 寻找第一个 URL-Test 组 (在我们的定制模板中是 🚀 自动测速)
-        for group in config_data['proxyGroups']:
-            if group['type'].lower() == 'urltest': 
-                test_group_name = group['name']
-                break
-                
-        if not test_group_name:
-             raise ValueError("未在配置中找到 URL-Test 代理组。")
-             
-        encoded_group_name = requests.utils.quote(test_group_name)
-        api_select_url = f"http://{API_HOST}:{API_PORT}/proxies/{encoded_group_name}"
+        # 4. 等待 API 启动
+        api_url = f"http://{API_HOST}:{api_port}/version"
+        headers = {'Authorization': 'Bearer githubactions'}
         
-        print(f"触发代理组 '{test_group_name}' URL 测试...")
-        response = requests.get(api_select_url + f"/delay?url={TEST_URL}&timeout=5000", headers=headers, timeout=30)
+        # 尝试 5 次，每次间隔 0.5s，总共等待 2.5s
+        for _ in range(5): 
+            try:
+                response = requests.get(api_url, headers=headers, timeout=0.5)
+                if response.status_code == 200:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(0.5)
+        else:
+            # API 启动失败，视为测试失败
+            return False, node_link 
+            
+        # 5. 触发延迟测试
+        api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{requests.utils.quote(proxy_name_final)}/delay?url={TEST_URL}&timeout={NODE_TIMEOUT}000"
+        
+        response = requests.get(api_delay_url, headers=headers, timeout=NODE_TIMEOUT)
         response.raise_for_status()
-        time.sleep(5) 
-
-        api_proxy_providers_url = f"http://{API_HOST}:{API_PORT}/providers/proxies"
-        response = requests.get(api_proxy_providers_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        proxy_data = response.json()
+        delay_data = response.json()
         
-        successful_nodes = []
-        
-        for provider_name, provider_data in proxy_data.items():
-            for proxy in provider_data.get('proxies', []):
-                if 'delay' in proxy and isinstance(proxy['delay'], int) and proxy['delay'] > 0:
-                    successful_nodes.append(proxy['name'])
-                    
-        print(f"✅ 成功找到 {len(successful_nodes)} 个可用节点。")
-        return successful_nodes
-        
+        # 6. 检查结果
+        delay = delay_data.get('delay', -1)
+        if delay > 0:
+            print(f"✅ SUCCESS ({delay}ms): {proxy_name_final}")
+            return True, node_link
+        else:
+            return False, node_link
+            
     except Exception as e:
-        print(f"❌ 执行 URL 测试或获取结果失败: {e}", file=sys.stderr)
-        return []
+        # print(f"❌ FAIL ({proxy_name_final}): {e}", file=sys.stderr)
+        return False, node_link
         
-def save_results(successful_node_names):
-    """保存成功的节点名称。"""
+    finally:
+        # 7. 清理
+        if clash_process:
+            clash_process.terminate()
+        if os.path.exists(CONFIG_PATH):
+            os.remove(CONFIG_PATH)
+        if os.path.exists(LOG_PATH):
+            os.remove(LOG_PATH)
+
+
+def run_parallel_tests(all_nodes):
+    """
+    使用线程池并行测试所有节点。
+    """
+    print("--- 2. 正在并行连通性测试 ---")
+    results = []
+    
+    # 使用 ThreadPoolExecutor 并行执行测试
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 提交所有任务
+        futures = {executor.submit(test_single_node, node_link): node_link for node_link in all_nodes}
+        
+        # 收集结果
+        for i, future in enumerate(futures):
+            # 实时显示进度
+            sys.stdout.write(f"[{i+1}/{len(all_nodes)}] Testing... \r")
+            sys.stdout.flush()
+            
+            try:
+                status, link = future.result()
+                results.append((status, link))
+            except Exception as exc:
+                print(f"[{i+1}/{len(all_nodes)}] ❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
+                
+    return results
+
+
+def save_results(results):
+    """
+    生成并保存成功的节点链接到固定的文件 (无时间戳)。
+    """
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     now_shanghai = datetime.datetime.now(shanghai_tz)
+    
+    # 目录格式: YYYY/MM/
     output_dir = now_shanghai.strftime('%Y/%m')
-    output_filename = 'success-nodes-mihomo-local.txt' 
+    
+    # 文件名: success-nodes-parallel.txt (与之前的 Subconverter 报告区分)
+    output_filename = 'success-nodes-parallel.txt' 
     output_path = os.path.join(output_dir, output_filename)
 
-    if not successful_node_names:
+    successful_nodes = [link for status, link in results if status]
+    
+    print("\n--- 3. 正在生成报告 ---")
+    
+    if not successful_nodes:
         print("⚠️ 没有节点测试成功。不生成报告文件。")
         return None
 
     os.makedirs(output_dir, exist_ok=True)
     
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("# 节点连通性测试成功结果 (Mihomo/Clash.Meta 本地 Subconverter 转换)\n")
+        f.write("# 节点连通性测试成功结果 (并行测试)\n")
         f.write(f"测试时间 (上海): {now_shanghai.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"成功连接数: {len(successful_node_names)}\n")
+        f.write(f"总节点数: {len(results)}\n")
+        f.write(f"成功连接数: {len(successful_nodes)}\n")
         f.write("---\n")
         
-        for name in successful_node_names:
-            f.write(f"{name}\n")
+        for link in successful_nodes:
+            f.write(f"{link}\n")
 
     print(f"✅ 测试完成。成功节点列表已保存到: {output_path}")
     return output_path
 
 if __name__ == "__main__":
     
-    if not download_clash_core():
+    # 检查 Mihomo 核心是否存在
+    if not os.path.exists("./mihomo-linux-amd64"):
+        print("❌ 错误：Mihomo 核心文件 ./mihomo-linux-amd64 未找到。", file=sys.stderr)
         sys.exit(1)
     
-    raw_nodes = fetch_and_parse_nodes()
+    # 授权执行
+    try:
+        subprocess.run(['chmod', '+x', './mihomo-linux-amd64'], check=True)
+    except:
+        pass # 假设工作流已经授权
+        
+    all_nodes = fetch_and_parse_nodes()
     
-    if not raw_nodes:
+    if not all_nodes:
+        print("没有找到任何节点，退出。")
         sys.exit(0)
     
-    # ！！！ 调用本地 Subconverter 转换函数 ！！！
-    if not convert_nodes_with_local_subconverter(raw_nodes):
-        sys.exit(1)
-        
-    clash_process = start_clash()
+    results = run_parallel_tests(all_nodes)
     
-    if not clash_process:
-        print("❌ Mihomo 核心启动失败，无法进行测试。")
-        sys.exit(1)
-        
-    try:
-        successful_names = run_clash_test(clash_process)
-        final_path = save_results(successful_names)
-        
-        if final_path:
-            print(f"REPORT_PATH={final_path}")
-            
-    finally:
-        if 'clash_process' in locals() and clash_process:
-            clash_process.terminate()
-            print("Mihomo 进程已终止。")
+    final_path = save_results(results)
+    
+    if final_path:
+        # 将结果路径输出到 GitHub Actions 变量
+        print(f"REPORT_PATH={final_path}")
