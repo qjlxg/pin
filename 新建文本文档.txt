@@ -1,0 +1,7 @@
+trojan://bpb-trojan@www.vpslook.com:443?security=tls&sni=这里填域名&alpn=h3&fp=randomized&allowlnsecure=1&type=ws&host=这里填域名&path=%2Ftr%3Fed%3D2560#BPB
+
+
+比如link.txt中的域名为:www.speedtest.net,代入节点中就成为了
+trojan://bpb-trojan@www.vpslook.com:443?security=tls&sni=www.speedtest.net&alpn=h3&fp=randomized&allowlnsecure=1&type=ws&host=www.speedtest.net&path=%2Ftr%3Fed%3D2560#BPB
+
+#BPB 要加序列号如#BPB_01 升序排列，生成的节点结果最好是去重复
