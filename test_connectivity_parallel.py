@@ -33,7 +33,7 @@ TEST_URLS = [
 ]
 
 # 核心调整：根据您要求设置
-MAX_WORKERS = 8       # 线程数
+MAX_WORKERS = 8       # 并发线程数
 MAX_API_WAIT_TIME = 30 # 最大 API 等待时间 (秒)
 NODE_TIMEOUT = 15
 MAX_RETRIES = 2
@@ -56,10 +56,10 @@ def check_and_download_geodata():
         print(f"✅ GeoData 文件已存在于 {SHARED_GEO_DIR}，跳过下载。", flush=True)
         return True
 
-    print(f"⚠️ GeoData 文件不存在，正在通过 mihomo 下载 GeoIP/GeoSite...", flush=True)
+    print(f"⚠️ GeoData 文件不存在，正在通过 mihomo 下载 GeoIP/GeoSite (最多等待 60s)...", flush=True)
     temp_config_path = os.path.join(SHARED_GEO_DIR, "temp_config_download.yaml")
     
-    # 创建一个极简配置，目的是触发 mihomo 下载 GeoData 到 SHARED_GEO_DIR
+    # 创建一个极简配置，目的是触发 mihomo 下载 GeoData
     temp_yaml = f"""
 log-level: info
 mixed-port: 50000
@@ -132,12 +132,11 @@ def fetch_and_parse_nodes():
 
 
 def test_single_node(node_link):
-    # temp_dir 现在只用于存放 config 和 log 文件，GeoData 在共享目录
-    temp_dir = None
+    # temp_dir 只用于存放 config 和 log 文件，GeoData 在共享目录
     clash_process = None
     
     try:
-        # 使用 tempfile.TemporaryDirectory 确保自动清理 config/log
+        # 使用 TemporaryDirectory 确保自动清理 config/log
         with tempfile.TemporaryDirectory(prefix="mihomo_test_") as temp_dir: 
             
             proxy_name_final = "NODE"
@@ -176,7 +175,7 @@ def test_single_node(node_link):
                 proxy_config_yaml = ""
                 protocol = ""
 
-                # --- 协议解析与配置生成 (略，保持 V4 一致) ---
+                # --- 协议解析与配置生成 (Trojan, VLESS, VMESS, Hysteria2) ---
                 try:
                     url_parts = urlparse(node_link)
                     raw_protocol = url_parts.scheme.lower()
@@ -184,27 +183,8 @@ def test_single_node(node_link):
                     if raw_protocol in ['hy2', 'hysteria2']:
                         protocol = 'hysteria2'
 
-                    if protocol == 'trojan':
-                        password = url_parts.username or ""
-                        server = url_parts.hostname
-                        port = url_parts.port or 443
-                        params = parse_qs(url_parts.query)
-                        sni = params.get('sni', params.get('peer', ['']))[0] or server
-                        allow_insecure = params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']
-                        tls_config = f"  tls: true\n  servername: {sni}\n  skip-cert-verify: {str(allow_insecure).lower()}\n"
-                        ws_config = ""
-                        if params.get('type', [''])[0].lower() == 'ws':
-                            path = unquote(params.get('path', ['/'])[0])
-                            host_header = params.get('host', [sni])[0]
-                            ws_config = f"  network: ws\n  ws-opts:\n    path: {path}\n    headers:\n      Host: {host_header}\n"
-                        proxy_config_yaml = f"""  - name: {proxy_name_final}
-    type: trojan
-    server: {server}
-    port: {port}
-    password: {password}
-{tls_config}{ws_config}"""
-
-                    elif protocol == 'vless':
+                    # VLESS 解析 (省略代码细节，保证逻辑正确)
+                    if protocol == 'vless':
                         uuid = url_parts.username
                         server = url_parts.hostname
                         port = url_parts.port or 443
@@ -241,6 +221,28 @@ def test_single_node(node_link):
     udp: true
 {flow_config}{tls_config}{transport_config}"""
 
+                    # TROJAN 解析 (省略代码细节)
+                    elif protocol == 'trojan':
+                        password = url_parts.username or ""
+                        server = url_parts.hostname
+                        port = url_parts.port or 443
+                        params = parse_qs(url_parts.query)
+                        sni = params.get('sni', params.get('peer', ['']))[0] or server
+                        allow_insecure = params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']
+                        tls_config = f"  tls: true\n  servername: {sni}\n  skip-cert-verify: {str(allow_insecure).lower()}\n"
+                        ws_config = ""
+                        if params.get('type', [''])[0].lower() == 'ws':
+                            path = unquote(params.get('path', ['/'])[0])
+                            host_header = params.get('host', [sni])[0]
+                            ws_config = f"  network: ws\n  ws-opts:\n    path: {path}\n    headers:\n      Host: {host_header}\n"
+                        proxy_config_yaml = f"""  - name: {proxy_name_final}
+    type: trojan
+    server: {server}
+    port: {port}
+    password: {password}
+{tls_config}{ws_config}"""
+
+                    # VMESS 解析 (省略代码细节)
                     elif protocol == 'vmess':
                         body = node_link[8:].split('#')[0]
                         body += '=' * ((4 - len(body) % 4) % 4)
@@ -272,6 +274,7 @@ def test_single_node(node_link):
     udp: true
 {tls_config}{network_config}"""
 
+                    # HYSTERIA2 解析 (省略代码细节)
                     elif protocol == 'hysteria2':
                         password = url_parts.username or ""
                         server = url_parts.hostname
@@ -316,8 +319,8 @@ mode: rule
 mixed-port: {proxy_port}
 external-controller: 127.0.0.1:{api_port}
 secret: githubactions
-geodata-dir: {SHARED_GEO_DIR}
-geodata-loader: memconservative
+geodata-dir: {SHARED_GEO_DIR} # <--- 使用共享目录
+geodata-loader: memconservative # <--- 加速启动
 
 proxies:
 {proxy_config_yaml}
@@ -337,12 +340,12 @@ proxy-groups:
                     stderr=subprocess.STDOUT
                 )
 
-                # --- API 启动检测 (使用更长的等待时间) ---
+                # --- API 启动检测 (30秒等待) ---
                 api_url = f"http://127.0.0.1:{api_port}/version"
                 headers = {'Authorization': 'Bearer githubactions'}
                 api_started = False
                 
-                # 等待 MAX_API_WAIT_TIME
+                # 等待 MAX_API_WAIT_TIME (30秒)
                 for _ in range(API_WAIT_LOOPS): 
                     try:
                         r = requests.get(api_url, headers=headers, timeout=1)
@@ -354,7 +357,6 @@ proxy-groups:
 
                 if not api_started:
                     if VERBOSE:
-                        # 使用 API_WAIT_LOOPS * 0.5 来显示实际等待时间
                         print(f"  ❌ API 启动失败 (超时 {MAX_API_WAIT_TIME}秒)（第 {attempt+1} 次）", flush=True) 
                     
                     if clash_process:
@@ -417,11 +419,10 @@ proxy-groups:
             except subprocess.TimeoutExpired:
                 clash_process.kill()
                 clash_process.wait()
-        # 注意：这里不再需要手动清理 temp_dir，因为使用了 TemporaryDirectory
 
     return False, node_link, 99999
 
-# --- run_parallel_tests 和 save_results 函数（保持 V4 一致） ---
+# --- 并行执行逻辑（run_parallel_tests） ---
 def run_parallel_tests(all_nodes):
     print(f"\n=== 开始并行测试 Workers={MAX_WORKERS} ===", flush=True)
     valid_nodes = [n for n in all_nodes if n.strip()]
@@ -438,6 +439,7 @@ def run_parallel_tests(all_nodes):
                 remark = link.split('#')[-1][:40] if '#' in link else '无备注'
                 mark = "✅" if status else "❌"
                 delay_str = f"{delay_ms}ms" if status else "失败"
+                # 打印进度和结果
                 print(f"[{completed:>{len(str(len(valid_nodes)))}}/{len(valid_nodes)}] {mark} {delay_str} → {remark}", flush=True)
 
             except Exception as e:
@@ -447,6 +449,7 @@ def run_parallel_tests(all_nodes):
     print("=== 并行测试结束 ===", flush=True)
     return results
 
+# --- 结果保存逻辑（save_results） ---
 def save_results(results):
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     now_shanghai = datetime.datetime.now(shanghai_tz)
@@ -481,7 +484,7 @@ if __name__ == "__main__":
 
     os.system("chmod +x ./mihomo-linux-amd64")
     
-    # 步骤 1：检查并下载 GeoData
+    # 步骤 1：检查或下载 GeoData
     if not check_and_download_geodata():
         print("❌ 无法获取 GeoData 文件，测试无法继续。", file=sys.stderr)
         sys.exit(1)
