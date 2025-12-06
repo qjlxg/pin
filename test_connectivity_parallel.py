@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py（终极完整版 - 支持 Trojan / VLess / VMess / Hysteria2 - 2025-12-06）
+# test_connectivity_parallel.py（终极完整版 - 支持 Trojan / VLess / VMess / Hysteria2 - 2025-12-06 - 调试增强版）
 import os
 import sys
 import datetime
@@ -26,10 +26,10 @@ TEST_URLS = [
     "http://www.microsoft.com",
 ]
 
-MAX_WORKERS = 30     # 稳定后建议 20-30
-NODE_TIMEOUT = 10
+MAX_WORKERS = 25     # 稳定后建议 20-30
+NODE_TIMEOUT = 12
 MAX_RETRIES = 2
-VERBOSE = True       # ← 新增：全局详细日志开关（默认开）
+VERBOSE = True       # 全局详细日志开关（默认开）
 
 def fetch_and_parse_nodes():
     """从远程 URL 获取并解析节点链接。"""
@@ -37,22 +37,21 @@ def fetch_and_parse_nodes():
     all_content = []
     for url in REMOTE_CONFIG_URLS:
         try:
-            print(f"下载: {url}")
+            print(f"DEBUG: 准备下载 {url}") # <--- 新增日志点 A
             response = requests.get(url, timeout=15)
+            print(f"DEBUG: 下载完成 {url}, 状态码: {response.status_code}") # <--- 新增日志点 B
             response.raise_for_status()
             all_content.append(response.text)
         except Exception as e:
-            print(f"⚠️ 下载失败: {e}", file=sys.stderr)
-    
+            print(f"⚠️ 下载失败: {url} | 错误: {e}", file=sys.stderr) # 增强失败日志
+            
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
-    # 匹配常见的协议或配置关键字
     protocol_regex = r'(://|@|\b(vmess|ss|trojan|vless|hysteria2|hy2|tuic)\b|server\s*:\s*.)'
     
     for line in all_lines:
         stripped = line.strip()
         if stripped and not stripped.startswith('#') and re.search(protocol_regex, stripped, re.IGNORECASE):
-            # 清理可能的重复协议头
             cleaned = stripped.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
             unique_nodes.add(cleaned)
             
@@ -60,17 +59,19 @@ def fetch_and_parse_nodes():
     print(f"修复并过滤后，发现 {len(all_nodes)} 个潜在节点链接。")
     return all_nodes
 
+# ---------------------------------------------------------------------
+# test_single_node 函数（未变动，保持原样）
+# ---------------------------------------------------------------------
+
 def test_single_node(node_link):
     """测试单个节点的连通性，支持重试。"""
     temp_dir = None
     clash_process = None
     
-    # 提取备注名称（用于日志更清晰）
     proxy_name_final = "UNKNOWN_NODE"
     remark_match = re.search(r'#(.+)', node_link)
     if remark_match:
         try:
-            # URL 解码并清理特殊字符
             proxy_name_final = re.sub(r'[\'\":\[\]]', '', unquote(remark_match.group(1)).strip())[:60]
         except:
             pass
@@ -83,14 +84,12 @@ def test_single_node(node_link):
             if VERBOSE and MAX_RETRIES > 1:
                 print(f"  └─ 第 {attempt+1}/{MAX_RETRIES} 次尝试")
 
-            # 生成唯一的端口和文件路径
             seed_str = f"{node_link}_{attempt}_{threading.get_ident()}_{int(time.time()*100000)}"
             seed = abs(hash(seed_str)) % 25000
             api_port = 30000 + seed
             proxy_port = 40000 + seed
             unique_id = f"t{threading.get_ident()}_a{attempt}_{seed}"
             
-            # 使用 temp_dir 以便清理
             if temp_dir is None:
                 temp_dir = tempfile.mkdtemp(prefix="mihomo_test_")
             
@@ -106,7 +105,6 @@ def test_single_node(node_link):
                 raw_protocol = url_parts.scheme.lower()
                 protocol = raw_protocol
                 
-                # 协议别名处理
                 if raw_protocol in ['hy2', 'hysteria2']:
                     protocol = 'hysteria2'
 
@@ -120,7 +118,6 @@ def test_single_node(node_link):
                     
                     params = parse_qs(url_parts.query)
                     
-                    # TLS 配置
                     tls_config = "  tls: true\n  skip-cert-verify: false\n"
                     sni = params.get('sni', params.get('peer', ['']))[0] or server
                     if sni:
@@ -128,7 +125,6 @@ def test_single_node(node_link):
                     if params.get('allowInsecure', params.get('allowinsecure', ['0']))[0] in ['1', 'true']:
                         tls_config = tls_config.replace("false", "true")
                     
-                    # WebSocket 传输
                     ws_config = ""
                     if params.get('type', [''])[0].lower() == 'ws':
                         path = unquote(params.get('path', ['/'])[0])
@@ -192,7 +188,6 @@ def test_single_node(node_link):
                     flow_config = f"    flow: {flow}\n" if flow else ""
                     transport_config = ""
                     
-                    # 传输方式配置
                     if network == 'ws':
                         path = unquote(params.get('path', ['/'])[0])
                         host = params.get('host', [sni])[0]
@@ -223,7 +218,6 @@ def test_single_node(node_link):
 
                 # ==================== VMess ====================
                 elif protocol == 'vmess':
-                    # 解码 Base64
                     body = node_link[8:].split('#')[0]
                     body += '=' * ((4 - len(body) % 4) % 4)
                     vmess_json = json.loads(base64.b64decode(body).decode('utf-8'))
@@ -240,11 +234,9 @@ def test_single_node(node_link):
                     host = vmess_json.get('host', '')
                     ps = vmess_json.get('ps', '')
                     
-                    # 使用备注
                     if ps and proxy_name_final == "UNKNOWN_NODE":
                         proxy_name_final = re.sub(r'[\'\":\[\]]', '', unquote(ps)[:60])
 
-                    # TLS 配置
                     tls_config = ""
                     if tls == 'tls':
                         tls_config = f"""
@@ -252,7 +244,6 @@ def test_single_node(node_link):
     skip-cert-verify: false
     servername: {sni}
 """
-                    # 传输方式配置
                     network_config = ""
                     if net == 'ws':
                         headers = f"\n      Host: {host or sni}" if host or sni else ""
@@ -291,22 +282,18 @@ def test_single_node(node_link):
                         
                     params = parse_qs(url_parts.query)
 
-                    # 密码可能在 query 中
                     if not password:
                         password = params.get('auth', [''])[0] or params.get('password', [''])[0]
 
                     sni = params.get('sni', params.get('peer', ['']))[0] or server
                     insecure = params.get('insecure', params.get('allowInsecure', ['0']))[0] in ['1', 'true']
                     
-                    # 限速
                     up_mbps = params.get('up', params.get('upmbps', ['100']))[0]
                     down_mbps = params.get('down', params.get('downmbps', ['100']))[0]
 
-                    # 混淆配置
                     obfs_type = params.get('obfs', [''])[0]
                     obfs_password = params.get('obfs-password', params.get('obfsPassword', ['']))[0]
 
-                    # TLS/SNI 配置
                     tls_config = f"""
     tls: true
     servername: {sni}
@@ -314,7 +301,6 @@ def test_single_node(node_link):
     alpn:
       - h3
 """
-                    # Obfs (混淆) 配置
                     obfs_config = ""
                     if obfs_type and obfs_type == 'salamander':
                         obfs_config = f"""
@@ -338,12 +324,12 @@ def test_single_node(node_link):
                 else:
                     if VERBOSE:
                         print(f"  ⚠️  跳过不支持的协议: {raw_protocol}")
-                    return False, node_link # 跳过不支持的协议
+                    return False, node_link
 
             except Exception as e:
                 if VERBOSE:
                     print(f"  ❌ 解析失败 [{protocol.upper()}]: {e}")
-                return False, node_link # 解析失败
+                return False, node_link
 
             # --- 2. 写入配置文件并启动 mihomo ---
             
@@ -366,7 +352,11 @@ proxy-groups:
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(yaml_content)
 
-            # 启动 mihomo 核心
+            if clash_process:
+                # 确保上一次的进程被杀死
+                clash_process.kill()
+                clash_process.wait(timeout=3)
+            
             clash_process = subprocess.Popen(
                 ["./mihomo-linux-amd64", "-f", config_path, "-d", temp_dir],
                 stdout=open(log_path, 'w'),
@@ -377,7 +367,7 @@ proxy-groups:
             api_url = f"http://127.0.0.1:{api_port}/version"
             headers = {'Authorization': 'Bearer githubactions'}
             api_started = False
-            for _ in range(20): # 10秒超时
+            for _ in range(20):
                 try:
                     r = requests.get(api_url, headers=headers, timeout=1)
                     if r.status_code == 200:
@@ -390,55 +380,47 @@ proxy-groups:
                 if VERBOSE:
                     print(f"  ❌ API 启动超时（尝试 {attempt+1}）")
                 
-                # 尝试结束进程并继续下一轮重试
                 if clash_process:
                     clash_process.kill()
                     clash_process.wait(timeout=3)
                 continue 
 
-            time.sleep(1.8) # 启动后等待片刻，确保核心初始化完成
+            time.sleep(1.8)
 
             # --- 4. 延迟测试（连通性检测） ---
             encoded_name = quote(proxy_name_final)
             success = False
-            delay_ms = 0
             
             for test_url in TEST_URLS:
                 delay_url = f"http://127.0.0.1:{api_port}/proxies/{encoded_name}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT * 1000}"
                 try:
-                    # 请求延迟测试 API，设置超时时间
                     r = requests.get(delay_url, headers=headers, timeout=NODE_TIMEOUT + 2)
-                    delay_ms = r.json().get('delay', 0)
+                    delay = r.json().get('delay', 0)
                     
-                    if delay_ms > 0:
+                    if delay > 0:
                         if VERBOSE:
-                            print(f"  ✅ 成功！延迟 {delay_ms}ms → {test_url.split('/')[2]}")
+                            print(f"  ✅ 成功！延迟 {delay}ms → {test_url.split('/')[2]}")
                         success = True
-                        break # 任一 URL 成功即可
+                        break
                 except Exception as e:
-                    # 连通性测试失败，继续尝试下一个 URL
                     if VERBOSE:
                          print(f"  → 测试 {test_url.split('/')[2]} 失败或超时: {e.__class__.__name__}")
                     pass
 
             if success:
-                return True, node_link # 节点测试成功
+                return True, node_link
 
-            # 节点测试失败，继续下一轮重试
-            
-            # 失败时打印完整 mihomo 日志（更详细）
+            # 节点测试失败，打印核心日志
             if os.path.exists(log_path):
                 with open(log_path, 'r', encoding='utf-8') as f:
                     log_content = f.read()
                 if log_content.strip():
-                    # 避免日志过长
                     print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
                     print(log_content[:3000], file=sys.stderr)
                     if len(log_content) > 3000:
                         print("...（日志已截断）", file=sys.stderr)
                     print("-" * 60, file=sys.stderr)
             
-            # 结束进程，准备下一轮重试
             if clash_process:
                 clash_process.kill()
                 clash_process.wait(timeout=3)
@@ -454,7 +436,11 @@ proxy-groups:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
             
-    return False, node_link # 所有尝试均失败
+    return False, node_link
+
+# ---------------------------------------------------------------------
+# run_parallel_tests 函数（未变动，保持原样）
+# ---------------------------------------------------------------------
 
 def run_parallel_tests(all_nodes):
     """主函数：并行执行所有节点的测试。"""
@@ -463,15 +449,12 @@ def run_parallel_tests(all_nodes):
     results = []
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # 将所有节点提交给线程池
         futures = {executor.submit(test_single_node, node): node for node in valid_nodes}
         
-        # 实时处理结果
         for i, future in enumerate(futures, 1):
             status, link = future.result()
             results.append((status, link))
             
-            # 实时进度美化
             total_nodes = len(valid_nodes)
             success_mark = "✅" if status else "❌"
             remark = link.split('#')[-1][:40] if '#' in link else '无备注'
@@ -483,9 +466,12 @@ def run_parallel_tests(all_nodes):
                 
     return results
 
+# ---------------------------------------------------------------------
+# save_results 函数（未变动，保持原样）
+# ---------------------------------------------------------------------
+
 def save_results(results):
     """将成功的节点保存到文件并打印报告。"""
-    # 设置时区和文件名
     shanghai_tz = pytz.timezone('Asia/Shanghai')
     now_shanghai = datetime.datetime.now(shanghai_tz)
     output_dir = now_shanghai.strftime('%Y/%m')
@@ -535,6 +521,5 @@ if __name__ == "__main__":
     results = run_parallel_tests(all_nodes)
     final_path = save_results(results)
     
-    # 为 GitHub Actions 输出报告路径
     if final_path:
         print(f"\nREPORT_PATH={final_path}")
