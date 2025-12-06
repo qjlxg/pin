@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定运行版：修复 Trojan-WS 解析和线程端口溢出)
+# test_connectivity_parallel.py (最终稳定版：修复所有启动、端口和解析问题)
 import os
 import sys
 import datetime
@@ -17,15 +17,15 @@ REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
 ]
 
-# 增加测试目标列表，提高可用性判断
+# 增加测试目标列表，提高可用性判断 (任一目标成功即通过)
 TEST_URLS = [
     "http://www.google.com/generate_204",  
     "http://www.youtube.com",             
     "http://www.microsoft.com",           
 ]
 
-# 核心调试设置：降低并发，解决资源耗尽问题
-MAX_WORKERS = 4 
+# 优化建议：将 MAX_WORKERS 调高到 32/64 以加速测试
+MAX_WORKERS = 32 # <-- 性能优化：建议增加到 32 或更高
 # 核心调试设置：增加超时时间
 NODE_TIMEOUT = 10 
 # 最大重试次数
@@ -84,7 +84,6 @@ def test_single_node(node_link):
             combined_hash = abs(thread_id ^ link_hash)
             
             # 约束端口种子范围 (例如 0 到 39999)，确保最终端口号不超过 65535
-            # MAX_PORT_SEED = 40000
             constrained_seed = combined_hash % 40000 
             
             # 加上尝试次数以确保重试时端口不同
@@ -113,6 +112,7 @@ def test_single_node(node_link):
         if proxy_label_match:
             try:
                 raw_name = unquote(proxy_label_match.group(1).strip())
+                # 清理代理名称中的特殊字符
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
@@ -157,6 +157,7 @@ def test_single_node(node_link):
                 ws_config = ""
                 if params.get('type', [''])[0].lower() == 'ws':
                     path = unquote(params.get('path', ['/'])[0])
+                    # 修复：确保 host 字段正确获取，默认为服务器地址
                     host_header = params.get('host', [server])[0] 
                     
                     ws_config = f"""
@@ -181,7 +182,8 @@ def test_single_node(node_link):
                 return False, node_link 
 
         except Exception as e:
-            print(f"\n❌ FATAL PARSE ERROR (Trojan): 处理 {node_link[:50]}... 失败: {e}", file=sys.stderr)
+            # 记录解析错误但不重试，因为链接本身有问题
+            print(f"\n❌ FATAL PARSE ERROR: 处理 {node_link[:50]}... 失败: {e}", file=sys.stderr)
             return False, node_link 
 
 
@@ -202,7 +204,7 @@ proxy-groups:
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 f.write(yaml_content)
         except Exception:
-            continue 
+            continue # 如果文件写入失败，尝试下一轮重试
             
         is_successful = False
         api_started = False
@@ -210,6 +212,7 @@ proxy-groups:
 
         try:
             # 3. 启动 Mihomo 核心
+            # 注意: 使用 stdout=open(LOG_PATH, 'w') 是为了确保实时输出到日志文件
             clash_process = subprocess.Popen(
                 [f"./{CLASH_EXEC}", '-f', CONFIG_PATH, '-d', '.'],
                 stdout=open(LOG_PATH, 'w'), 
@@ -220,6 +223,7 @@ proxy-groups:
             api_url = f"http://{API_HOST}:{api_port}/version"
             headers = {'Authorization': 'Bearer githubactions'}
             
+            # 等待 10 个 0.5 秒间隔 (最多 5 秒)
             for _ in range(10): 
                 try:
                     response = requests.get(api_url, headers=headers, timeout=0.5)
@@ -230,15 +234,18 @@ proxy-groups:
                     pass
                 time.sleep(0.5)
             
+            # 如果 API 没起来，跳过测试，进入重试/清理
             if not api_started:
                 continue 
             
+            # 给予 Mihomo 额外的 1 秒缓冲时间
             time.sleep(1) 
             
             # 5. --- 多目标 URL 连通性测试 ---
             encoded_proxy_name_for_delay = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
+                # 使用 /delay API 进行连通性测试
                 api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
@@ -246,6 +253,7 @@ proxy-groups:
                     response.raise_for_status()
                     delay_data = response.json()
                     
+                    # 检查是否成功返回延迟值 (> 0)
                     if delay_data.get('delay', -1) > 0:
                         is_successful = True
                         break 
@@ -259,26 +267,29 @@ proxy-groups:
             pass
             
         finally:
+            # 6. 清理和日志记录
+            
             # 失败时打印 Mihomo 日志
-            if not is_successful:
-                if os.path.exists(LOG_PATH):
-                    try:
-                        with open(LOG_PATH, 'r', encoding='utf-8') as f:
-                            mihomo_log_content = f.read()
+            if not is_successful and os.path.exists(LOG_PATH):
+                try:
+                    with open(LOG_PATH, 'r', encoding='utf-8') as f:
+                        mihomo_log_content = f.read()
+                    
+                    if mihomo_log_content.strip():
+                        print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
+                        # 仅打印前 2000 个字符以保持日志简洁
+                        print(mihomo_log_content[:2000], file=sys.stderr)
+                        print("..." if len(mihomo_log_content) > 2000 else "", file=sys.stderr)
+                        print("-" * 50, file=sys.stderr)
                         
-                        if mihomo_log_content.strip():
-                            print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
-                            print(mihomo_log_content[:2000], file=sys.stderr)
-                            print("..." if len(mihomo_log_content) > 2000 else "", file=sys.stderr)
-                            print("-" * 50, file=sys.stderr)
-                            
-                    except Exception:
-                        pass 
+                except Exception:
+                    pass 
 
-            # 7. 清理
+            # 终止 Mihomo 进程
             if clash_process:
                 clash_process.terminate()
                 
+            # 清理配置文件和日志文件
             for path in [CONFIG_PATH, LOG_PATH]:
                 try:
                     if os.path.exists(path):
@@ -286,6 +297,7 @@ proxy-groups:
                 except Exception:
                     pass
         
+        # 失败后等待 1 秒再重试
         if attempt < MAX_RETRIES - 1:
             time.sleep(1) 
 
@@ -304,6 +316,7 @@ def run_parallel_tests(all_nodes):
         futures = {executor.submit(test_single_node, node_link): node_link for node_link in valid_nodes}
         
         for i, future in enumerate(futures):
+            # 实时进度显示
             sys.stdout.write(f"[{i+1}/{len(valid_nodes)}] Testing... \r")
             sys.stdout.flush()
             
@@ -313,6 +326,7 @@ def run_parallel_tests(all_nodes):
             except Exception as exc:
                 print(f"\n❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
                 
+    # 清除进度显示行
     sys.stdout.write(" " * 50 + "\r")
     sys.stdout.flush()
     
