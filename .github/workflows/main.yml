@@ -1,39 +1,53 @@
 name: ClashForge
 
 on:
+  # 1. 定时触发：每天 18:00 (北京时间) / 10:00 (UTC) 运行
   schedule:
-   - cron: '0 7-22/5 * * *'
+    - cron: '0 10 * * *'
+
+  # 2. Push 触发：当指定文件有变动时自动运行
   push:
-    paths-ignore:
-      - '**'
+    paths:
+      - 'ClashForge.py'
+      - '.github/workflows/ClashForge.yml' # 假设文件在默认路径
+      - 'requirements.txt' # 包含依赖文件
+
+  # 手动触发
   workflow_dispatch:
 
 jobs:
-  run_demo_actions:
+  run_clashforge:
+    # 更改任务名称以增加清晰度
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout code 📥
         uses: actions/checkout@v4
         with:
-          # 转到 Settings > Secrets and variables > Actions
-          # 点击 New repository secret，添加 Secret，名称为 BOT，输入你的token
+          # 使用 Secret BOT 作为访问 Token
           token: ${{ secrets.BOT }}
 
-      - name: Set up Python
+      - name: Set up Python 🐍
         uses: actions/setup-python@v2
         with:
           python-version: '3.10.10'
 
-      - name: Install requirements.txt
+      - name: Install requirements 🛠️
         run: |
           pip install -r ./requirements.txt
-      - name: Run ClashForge.py
+          
+      - name: Run ClashForge.py 🚀
         run: python ClashForge.py
 
-      - name: Commit and push file
+      - name: Commit and push generated config 📤
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add clash_config.yaml
-          git commit -m "update" || echo "No changes to commit"
-          git push https://${{ secrets.BOT }}:x-oauth-basic@github.com/${GITHUB_REPOSITORY}.git
+          # 确保 data 目录和文件存在
+          if [ -f "data/clash_config.yaml" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            # 修正文件名，确保提交 data/clash_config.yaml
+            git add data/clash_config.yaml 
+            git commit -m "update config (scheduled run at $(date +'%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
+            git push https://${{ secrets.BOT }}:x-oauth-basic@github.com/${GITHUB_REPOSITORY}.git
+          else
+            echo "⚠️ File data/clash_config.yaml not found, skipping commit."
+          fi
