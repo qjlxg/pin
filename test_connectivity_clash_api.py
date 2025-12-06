@@ -1,10 +1,10 @@
-# test_connectivity_clash_api.py (本地Subconverter转换版 - 最终完整版)
+# test_connectivity_clash_api.py (最终无限制版，使用本地 INI 模板)
 import os
 import sys
 import datetime
 import pytz
 import re
-import base64
+import base64 
 import json
 import subprocess
 import requests
@@ -13,13 +13,15 @@ import time
 # --- 配置 ---
 REMOTE_CONFIG_URLS = [
     "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/merged_configs.txt",
-    "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/all_unique_nodes.txt",
-    "https://raw.githubusercontent.com/qjlxg/go/refs/heads/main/nodes.txt",
+
 ]
 
 # *** 核心：本地可执行文件路径 ***
 LOCAL_MIHOMO_FILENAME = "mihomo-linux-amd64" 
-LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" # Subconverter 路径
+LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" 
+
+# *** 核心：自定义 INI 文件路径 ***
+LOCAL_INI_PATH = "./my_custom_clash_template.ini" 
 
 CLASH_EXECUTABLE = f"./{LOCAL_MIHOMO_FILENAME}"
 CLASH_CONFIG_PATH = "mihomo_config.yaml"
@@ -34,7 +36,6 @@ def download_clash_core():
     """检查本地 Mihomo 核心文件是否存在。"""
     print("--- 1. 正在检查本地 Mihomo 核心 ---")
     
-    # 授权操作已移至 YML 文件中，这里只做存在性检查
     if not os.path.exists(CLASH_EXECUTABLE):
         print(f"❌ 错误：本地 Mihomo 核心文件未找到，路径：{CLASH_EXECUTABLE}", file=sys.stderr)
         return False
@@ -43,7 +44,7 @@ def download_clash_core():
     return True
 
 def fetch_and_parse_nodes():
-    """下载并解析所有潜在的节点链接，返回 Base64 编码的虚拟订阅链接。"""
+    """下载并解析所有潜在的节点链接，返回原始文本格式的节点字符串。"""
     print("--- 2. 正在获取和解析所有节点 ---")
     all_content = []
     for url in REMOTE_CONFIG_URLS:
@@ -65,31 +66,43 @@ def fetch_and_parse_nodes():
                 unique_nodes.add(cleaned_line)
 
     print(f"修复并过滤后，发现 {len(unique_nodes)} 个潜在节点链接。")
-    # 将所有原始链接合并为一个 Base64 编码的虚拟订阅链接 (data URI)
+    # 直接返回原始节点字符串
     raw_nodes_string = '\n'.join(unique_nodes)
-    encoded_virtual_sub = base64.urlsafe_b64encode(raw_nodes_string.encode('utf-8')).decode('utf-8').rstrip('=')
-    return encoded_virtual_sub 
+    return raw_nodes_string 
 
-def convert_nodes_with_local_subconverter(encoded_virtual_sub):
-    """通过本地 Subconverter 可执行文件将 Base64 链接转换为 Clash YAML。"""
-    print("--- 3. 正在调用本地 Subconverter 转换配置 (支持 Vmess/Trojan/VLESS/SS 等) ---")
+def convert_nodes_with_local_subconverter(raw_nodes_string):
+    """
+    通过本地 Subconverter 可执行文件将原始节点列表通过 stdin 转换为 Clash YAML。
+    已移除超时限制。
+    """
+    print("--- 3. 正在调用本地 Subconverter 转换配置 (通过 stdin 输入) ---")
     
     if not os.path.exists(LOCAL_SUB_EXECUTABLE):
-        print(f"❌ 错误：本地 Subconverter 文件未找到，请检查工作流步骤是否成功下载：{LOCAL_SUB_EXECUTABLE}", file=sys.stderr)
+        print(f"❌ 错误：本地 Subconverter 文件未找到。", file=sys.stderr)
+        return False
+        
+    if not os.path.exists(LOCAL_INI_PATH):
+        print(f"❌ 错误：自定义 INI 文件未找到，路径：{LOCAL_INI_PATH}", file=sys.stderr)
         return False
 
     # 构建 Subconverter 命令行参数
-    # -r: 使用远程规则模板 (ACL4SSR)
-    # --url: data URI 方式传递 Base64 编码的节点列表
     command = [
         LOCAL_SUB_EXECUTABLE,
-        '-r', 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini', 
-        '--url', f'data:text/plain;base64,{encoded_virtual_sub}',
+        '-r', f'file://{LOCAL_INI_PATH}', # <--- 使用本地 INI 模板
+        '-f', 'text', 
+        '-e', 'false',
     ]
     
     try:
-        # 执行命令并捕获标准输出
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=90)
+        print("Subconverter 转换中... (已移除超时限制)")
+        result = subprocess.run(
+            command, 
+            input=raw_nodes_string, # 直接传递字符串 (str) 对象，无超时限制
+            capture_output=True, 
+            text=True, 
+            check=True, 
+            # timeout=None (默认为无限制)
+        )
         yaml_content = result.stdout
         
         if 'proxy-groups' not in yaml_content:
@@ -105,9 +118,8 @@ def convert_nodes_with_local_subconverter(encoded_virtual_sub):
 
         # 将配置中所有 'select' 类型的组改为 'url-test' 以触发测试
         yaml_content = re.sub(r'type:\s*select', 'type: url-test', yaml_content)
-        # 确保测试 URL 是我们需要的
         yaml_content = yaml_content.replace("url: http://www.gstatic.com/generate_204", f"url: {TEST_URL}")
-        yaml_content = yaml_content.replace("interval: 3600", "interval: 300") # 缩短测试间隔
+        yaml_content = yaml_content.replace("interval: 3600", "interval: 300") 
         
         with open(CLASH_CONFIG_PATH, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
@@ -163,7 +175,7 @@ def run_clash_test(clash_process):
         config_data = response.json()
         
         test_group_name = None
-        # 寻找第一个 URL-Test 组
+        # 寻找第一个 URL-Test 组 (在我们的定制模板中是 🚀 自动测速)
         for group in config_data['proxyGroups']:
             if group['type'].lower() == 'urltest': 
                 test_group_name = group['name']
@@ -176,12 +188,10 @@ def run_clash_test(clash_process):
         api_select_url = f"http://{API_HOST}:{API_PORT}/proxies/{encoded_group_name}"
         
         print(f"触发代理组 '{test_group_name}' URL 测试...")
-        # 发送 URL 测试请求
         response = requests.get(api_select_url + f"/delay?url={TEST_URL}&timeout=5000", headers=headers, timeout=30)
         response.raise_for_status()
-        time.sleep(5) # 给予核心时间完成测试
+        time.sleep(5) 
 
-        # 获取测试结果
         api_proxy_providers_url = f"http://{API_HOST}:{API_PORT}/providers/proxies"
         response = requests.get(api_proxy_providers_url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -191,7 +201,6 @@ def run_clash_test(clash_process):
         
         for provider_name, provider_data in proxy_data.items():
             for proxy in provider_data.get('proxies', []):
-                # 只有延迟大于 0 (毫秒) 才认为测试成功
                 if 'delay' in proxy and isinstance(proxy['delay'], int) and proxy['delay'] > 0:
                     successful_nodes.append(proxy['name'])
                     
@@ -233,13 +242,13 @@ if __name__ == "__main__":
     if not download_clash_core():
         sys.exit(1)
     
-    encoded_sub = fetch_and_parse_nodes()
+    raw_nodes = fetch_and_parse_nodes()
     
-    if not encoded_sub:
+    if not raw_nodes:
         sys.exit(0)
     
     # ！！！ 调用本地 Subconverter 转换函数 ！！！
-    if not convert_nodes_with_local_subconverter(encoded_sub):
+    if not convert_nodes_with_local_subconverter(raw_nodes):
         sys.exit(1)
         
     clash_process = start_clash()
