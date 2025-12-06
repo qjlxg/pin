@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终稳定版：修复 API 稳定性问题)
+# test_connectivity_parallel.py (Hysteria 支持与更新链接版)
 import os
 import sys
 import datetime
@@ -12,31 +12,30 @@ import time
 from urllib.parse import quote, unquote
 
 # --- 配置 ---
+# 已替换为用户指定的单个链接
 REMOTE_CONFIG_URLS = [
-    # 请确保此处的 URL 列表与您实际运行的节点源列表一致
     "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt",
-
 ]
 
 # 增加测试目标列表，提高可用性判断
 TEST_URLS = [
-    "http://www.google.com/generate_204",  # 基础连通性
-    "http://www.youtube.com",              # 媒体/GFW 穿透性
-    "http://www.microsoft.com",            # 微软服务连通性
+    "http://www.google.com/generate_204",  
+    "http://www.youtube.com",             
+    "http://www.microsoft.com",           
 ]
 
 # 最大并行工作线程数 
 MAX_WORKERS = 32
 # 每个节点的连接超时时间 (秒)
-NODE_TIMEOUT = 3 
-# 最大重试次数 - 解决瞬时网络波动导致的假失败
+NODE_TIMEOUT = 3
+# 最大重试次数
 MAX_RETRIES = 2 
 
 # --- 核心功能 ---
 
 def fetch_and_parse_nodes():
     """
-    下载远程文件，解析出潜在的节点链接。
+    下载远程文件，解析出潜在的节点链接，包括 Hysteria 协议。
     """
     print("--- 1. 正在获取和解析所有节点 ---")
     
@@ -55,11 +54,14 @@ def fetch_and_parse_nodes():
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
     
+    # === 协议过滤已更新：加入 hysteria 和 hy2 ===
+    protocol_regex = r'(://|@|\b(vmess|ss|trojan|vless|hysteria|hy2|tuic)\b|server\s*:\s*.)'
+    
     for line in all_lines:
         stripped_line = line.strip()
         if stripped_line and not stripped_line.startswith('#'):
             # 过滤主流协议链接
-            if re.search(r'(://|@|\b(vmess|ss|trojan|vless)\b|server\s*:\s*.)', stripped_line, re.IGNORECASE):
+            if re.search(protocol_regex, stripped_line, re.IGNORECASE):
                 cleaned_line = stripped_line.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
                 unique_nodes.add(cleaned_line)
 
@@ -72,15 +74,12 @@ def test_single_node(node_link):
     使用 Mihomo 核心作为子进程，进行多目标、多重试的连通性测试。
     """
     
-    # 尝试所有重试次数
     for attempt in range(MAX_RETRIES):
         clash_process = None
         
-        # 确保每个线程/尝试都有独特的端口和文件，解决高并发冲突
         try:
-            # 使用进程 ID 和尝试次数来创建唯一的 ID
+            # 确保每个线程/尝试都有独特的端口和文件，解决高并发冲突
             unique_id = f"{os.getpid()}_{attempt}_{int(time.time()*1000)}" 
-            # 确保尝试之间使用不同端口
             api_port = 19190 + os.getpid() % 100 + hash(node_link) % 1000 + attempt 
         except:
             unique_id = f"fallback_{attempt}_{int(time.time()*1000)}"
@@ -91,18 +90,15 @@ def test_single_node(node_link):
         LOG_PATH = f"mihomo_{unique_id}.log"
         API_HOST = "127.0.0.1"
 
-        # 1. 构造配置
-        # 尝试解析节点名称，如果失败，则使用安全的默认名称
-        proxy_name_final = node_link.split('://')[0].upper() # 默认名称 (e.g., TROJAN)
+        # 1. 构造配置 - 确保代理名称安全
+        proxy_name_final = node_link.split('://')[0].upper() 
         proxy_name_match = re.search(r'name=([^&]+)', node_link)
         if proxy_name_match:
             try:
-                # 提取并解码名称。使用 quote() 来编码空格等特殊字符
                 raw_name = unquote(proxy_name_match.group(1).split('#')[-1])
-                # 替换掉 Mihomo 不支持的 YAML 敏感字符，避免 YAML 解析错误
+                # 移除 YAML 敏感字符
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
-                # 编码失败，使用默认名称
                 pass
         
         yaml_content = f"""
@@ -112,7 +108,7 @@ secret: githubactions
 proxies:
   - {node_link}
 proxy-groups:
-  - name: {quote(proxy_name_final)} # 使用 URL 编码后的名称作为组名
+  - name: {quote(proxy_name_final)} 
     type: select
     proxies:
       - {proxy_name_final}
@@ -158,7 +154,6 @@ proxy-groups:
             
             # 5. --- 多目标 URL 连通性测试 ---
             
-            # Mihomo API 需要对代理名称进行 URL 编码
             encoded_proxy_name = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
@@ -170,16 +165,14 @@ proxy-groups:
                     response.raise_for_status()
                     delay_data = response.json()
                     
-                    # 6. 检查结果
-                    delay = delay_data.get('delay', -1)
-                    if delay > 0:
+                    if delay_data.get('delay', -1) > 0:
                         is_successful = True
                         break 
                 except Exception:
                     pass
 
             if is_successful:
-                return True, node_link # 成功返回，跳出重试循环
+                return True, node_link 
                 
         except Exception:
             pass
@@ -189,7 +182,6 @@ proxy-groups:
             if clash_process:
                 clash_process.terminate()
                 
-            # 清理文件
             for path in [CONFIG_PATH, LOG_PATH]:
                 try:
                     if os.path.exists(path):
@@ -197,11 +189,9 @@ proxy-groups:
                 except Exception:
                     pass
         
-        # 如果当前尝试失败，并且不是最后一次尝试，则等待 1 秒后重试
         if attempt < MAX_RETRIES - 1:
             time.sleep(1) 
 
-    # 所有重试次数都失败
     return False, node_link 
 
 
@@ -211,14 +201,12 @@ def run_parallel_tests(all_nodes):
     """
     print("--- 2. 正在并行连通性测试 ---")
     results = []
-    
     valid_nodes = [n for n in all_nodes if n.strip()]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(test_single_node, node_link): node_link for node_link in valid_nodes}
         
         for i, future in enumerate(futures):
-            # 实时显示进度
             sys.stdout.write(f"[{i+1}/{len(valid_nodes)}] Testing... \r")
             sys.stdout.flush()
             
@@ -228,7 +216,6 @@ def run_parallel_tests(all_nodes):
             except Exception as exc:
                 print(f"\n❌ ERROR: 并行执行出错: {exc}", file=sys.stderr)
                 
-    # 清除进度条
     sys.stdout.write(" " * 50 + "\r")
     sys.stdout.flush()
     
