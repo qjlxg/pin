@@ -441,7 +441,7 @@ def work_no_check(links, allowed_types=[]):
 if __name__ == '__main__':
     # Define initial links
     links = [
-        "https://raw.githubusercontent.com/qjlxg/pin/refs/heads/main/trojan_links.txt", 
+        "https://raw.githubusercontent.com/qjlxg/HA/refs/heads/main/config.yaml", 
     ]
 
     # Define allowed proxy types for filtering (optional)
