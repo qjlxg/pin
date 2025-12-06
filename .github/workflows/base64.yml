@@ -30,7 +30,7 @@ jobs:
           # 如果你希望在这里控制连通性测试的开关，可以添加 ENABLE_CONNECTIVITY_TEST 环境变量
           # ENABLE_CONNECTIVITY_TEST: "true"
         run: |
-          python subscribe/convert_to_base64.py
+          python convert_to_base64.py
 
       - name: Commit and push changes (if any) # 提交并推送更改 (如果文件有变化)
         if: success() # 只在前面的步骤都成功时才运行此步骤
