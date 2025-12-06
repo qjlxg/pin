@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (Hysteria 支持与更新链接版)
+# test_connectivity_parallel.py (最终稳定调试版：降低并发+增加超时+日志打印)
 import os
 import sys
 import datetime
@@ -24,10 +24,11 @@ TEST_URLS = [
     "http://www.microsoft.com",           
 ]
 
-# 最大并行工作线程数 
-MAX_WORKERS = 32
-# 每个节点的连接超时时间 (秒)
-NODE_TIMEOUT = 3
+# === 核心调试修改 1：降低并发，解决资源耗尽问题 ===
+MAX_WORKERS = 4 # 推荐从 4 开始测试。如果成功，可逐渐提高到 8 或 16。
+
+# === 核心调试修改 2：增加超时时间，解决 Mihomo 启动时间长的问题 ===
+NODE_TIMEOUT = 10 
 # 最大重试次数
 MAX_RETRIES = 2 
 
@@ -41,7 +42,6 @@ def fetch_and_parse_nodes():
     
     all_content = []
     
-    # 下载远程文件
     for url in REMOTE_CONFIG_URLS:
         try:
             print(f"下载: {url}")
@@ -54,13 +54,12 @@ def fetch_and_parse_nodes():
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
     
-    # === 协议过滤已更新：加入 hysteria 和 hy2 ===
+    # 协议过滤已更新：加入 hysteria 和 hy2
     protocol_regex = r'(://|@|\b(vmess|ss|trojan|vless|hysteria|hy2|tuic)\b|server\s*:\s*.)'
     
     for line in all_lines:
         stripped_line = line.strip()
         if stripped_line and not stripped_line.startswith('#'):
-            # 过滤主流协议链接
             if re.search(protocol_regex, stripped_line, re.IGNORECASE):
                 cleaned_line = stripped_line.replace("ss://ss://", "ss://").replace("vmess://vmess://", "vmess://")
                 unique_nodes.add(cleaned_line)
@@ -89,14 +88,13 @@ def test_single_node(node_link):
         CONFIG_PATH = f"config_{unique_id}.yaml"
         LOG_PATH = f"mihomo_{unique_id}.log"
         API_HOST = "127.0.0.1"
-
-        # 1. 构造配置 - 确保代理名称安全
         proxy_name_final = node_link.split('://')[0].upper() 
+        
+        # 1. 构造配置 - 确保代理名称安全
         proxy_name_match = re.search(r'name=([^&]+)', node_link)
         if proxy_name_match:
             try:
                 raw_name = unquote(proxy_name_match.group(1).split('#')[-1])
-                # 移除 YAML 敏感字符
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
@@ -123,6 +121,7 @@ proxy-groups:
             
         is_successful = False
         api_started = False
+        mihomo_log_content = "" # 用于存储日志内容
 
         try:
             # 3. 启动 Mihomo 核心
@@ -149,15 +148,13 @@ proxy-groups:
             if not api_started:
                 continue 
             
-            # === 核心修复：API 稳定延迟 ===
-            time.sleep(1) # 强制等待 1 秒，确保 Mihomo 核心完全稳定
+            # API 稳定延迟
+            time.sleep(1) 
             
             # 5. --- 多目标 URL 连通性测试 ---
-            
             encoded_proxy_name = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
-                # 触发延迟测试
                 api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
@@ -174,10 +171,28 @@ proxy-groups:
             if is_successful:
                 return True, node_link 
                 
-        except Exception:
+        except Exception as e:
+            # 如果出现启动异常，记录错误
+            mihomo_log_content = f"启动异常: {e}"
             pass
             
         finally:
+            # === 核心调试修改 3：失败时打印 Mihomo 日志 ===
+            if not is_successful:
+                if os.path.exists(LOG_PATH):
+                    try:
+                        with open(LOG_PATH, 'r', encoding='utf-8') as f:
+                            mihomo_log_content = f.read()
+                        
+                        # 只在日志非空时打印，避免刷屏
+                        if mihomo_log_content.strip():
+                            print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
+                            print(mihomo_log_content, file=sys.stderr)
+                            print("-" * 50, file=sys.stderr)
+                            
+                    except Exception:
+                        pass # 忽略读取日志文件的错误
+
             # 7. 清理
             if clash_process:
                 clash_process.terminate()
