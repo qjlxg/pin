@@ -1,8 +1,8 @@
-# .github/workflows/connectivity-test-clash-api.yml
-name: 测试 (Mihomo/Clash.Meta 本地转换)
+# .github/workflows/connectivity-test-parallel.yml
+name: 测试 (并行加速)
 
 on:
-  # 1. 允许手动运行
+  # 1. 允许手动运行 (无输入参数)
   workflow_dispatch:
   
   # 2. 脚本或核心文件变动时自动触发
@@ -10,16 +10,15 @@ on:
     branches:
       - main # 请根据您的主分支名称进行修改
     paths:
-      - 'test_connectivity_clash_api.py'
-      - 'mihomo-linux-amd64'
-      - 'subconverter/**' # 确保监测 subconverter 目录内的文件变化
-      - '.github/workflows/connectivity-test-clash-api.yml'
+      - 'test_connectivity_parallel.py' # 确保脚本更新时触发
+      - 'mihomo-linux-amd64' # 确保核心文件更新时触发
+      - '.github/workflows/connectivity-test-parallel.yml'
       
 jobs:
   test_and_push:
     runs-on: ubuntu-latest
     
-    # 授予写入权限
+    # 授予写入权限，允许 github-actions[bot] 推送新的提交
     permissions:
       contents: write 
     
@@ -31,6 +30,7 @@ jobs:
       - name: 📥 检出代码
         uses: actions/checkout@v4
         with:
+          # fetch-depth: 0 允许后续步骤推送新的提交
           fetch-depth: 0 
           
       - name: 🐍 设置 Python 环境
@@ -39,57 +39,31 @@ jobs:
           python-version: '3.x'
 
       - name: ⚙️ 安装依赖 (requests, pytz)
-        run: pip install requests pytz
-
-      - name: 💾 检查 Mihomo 核心 (mihomo-linux-amd64)
+        run: |
+          pip install requests pytz
+          
+      - name: 💾 检查 Mihomo 核心并授权
         run: |
           MIHOMO_EXEC="./mihomo-linux-amd64"
           if [ ! -f "$MIHOMO_EXEC" ]; then
             echo "::error::Mihomo 核心文件 $MIHOMO_EXEC 未找到，请确保已上传到仓库根目录。"
             exit 1
           fi
+          # 确保 Mihomo 核心有执行权限，供并行脚本调用
           chmod +x "$MIHOMO_EXEC"
           echo "✅ Mihomo 核心检查成功，已授权执行。"
 
-      - name: ⚙️ 检查 Subconverter 核心 (智能修复路径)
-        id: check-subconverter
-        run: |
-          # 脚本期望的最终路径
-          SUB_EXEC_FINAL="./subconverter-linux64"
-          
-          # 1. 检查是否已存在于期望路径
-          if [ -f "$SUB_EXEC_FINAL" ]; then
-            echo "✅ Subconverter 已位于期望路径。"
-          
-          # 2. 检查目录路径 (如果用户上传了 subconverter 目录)
-          elif [ -f "./subconverter/subconverter" ]; then
-            echo "⚠️ 在 './subconverter/subconverter' 路径找到文件，正在移动和重命名..."
-            # 移动文件并重命名
-            mv subconverter/subconverter "$SUB_EXEC_FINAL"
-            # 清理目录 (可选)
-            rm -rf subconverter 
-            echo "✅ 成功移动并重命名为 $SUB_EXEC_FINAL。"
-            
-          else
-            echo "::error::Subconverter 可执行文件未找到。请确认文件已上传到仓库根目录，且路径为 $SUB_EXEC_FINAL 或 subconverter/subconverter。"
-            exit 1
-          fi
-
-          # 3. 授权执行
-          chmod +x "$SUB_EXEC_FINAL"
-          echo "✅ Subconverter 已授权执行。"
-
-      - name: 🏃 执行 Mihomo 测试脚本
+      - name: 🏃 执行并行连通性测试脚本
         id: run-script
         run: |
           # 运行脚本
-          python test_connectivity_clash_api.py | tee run_output.txt
+          python test_connectivity_parallel.py | tee run_output.txt
           
           # 从脚本输出中提取 REPORT_PATH 变量
           REPORT_PATH=$(grep 'REPORT_PATH=' run_output.txt | cut -d'=' -f2)
           echo "REPORT_PATH=$REPORT_PATH" >> $GITHUB_OUTPUT
         
-      - name: ⬆️ 推送测试结果到仓库
+      - name: ⬆️ 推送测试结果到仓库 (已修复冲突问题)
         if: steps.run-script.outputs.REPORT_PATH != ''
         run: |
           REPORT_PATH=${{ steps.run-script.outputs.REPORT_PATH }}
@@ -106,8 +80,9 @@ jobs:
           
           if ! git diff-index --quiet HEAD; then
             DATE_SHANGHAI=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')
-            git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (本地转换)"
+            git commit -m "自动测试: 成功节点报告 ${DATE_SHANGHAI} (并行测试)"
             
+            # === 关键修复：在推送前拉取远程代码并变基，解决 'rejected' 错误 ===
             git pull --rebase origin ${GITHUB_REF#refs/heads/} 
             git push
           else
