@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py（GitHub Actions 最终稳定版 V6 - 假定 GeoData 已存在）
+# test_connectivity_parallel.py（GitHub Actions 极限稳定版 V7 - 降低并发）
 
 import os
 import sys
@@ -32,16 +32,14 @@ TEST_URLS = [
     "http://www.microsoft.com",
 ]
 
-# 核心调整：根据您要求设置
-MAX_WORKERS = 8       # 并发线程数
+# 核心调整：降低并发，确保稳定性
+MAX_WORKERS = 4       # ← 建议调整为 4 或 6
 MAX_API_WAIT_TIME = 30 # 最大 API 等待时间 (秒)
 NODE_TIMEOUT = 15
 MAX_RETRIES = 2
 VERBOSE = True
-# 共享 GeoData 目录 (此目录必须包含 geoip.dat 和 geosite.dat)
 SHARED_GEO_DIR = "./geodata_cache"
 
-# 将 API 启动检测的循环次数调整到匹配 MAX_API_WAIT_TIME
 API_WAIT_LOOPS = int(MAX_API_WAIT_TIME / 0.5) 
 
 
@@ -57,13 +55,10 @@ def fetch_and_parse_nodes():
         try:
             print(f"DEBUG: 准备下载 {url}", flush=True)
             response = requests.get(url, timeout=NETWORK_TIMEOUT)
-            print(f"DEBUG: 下载完成 {url}, 状态码: {response.status_code}", flush=True)
             response.raise_for_status()
             all_content.append(response.text)
-        except (Timeout, ConnectionError) as e:
-            print(f"⚠️ 下载失败 (网络错误): {url} | 错误: {e.__class__.__name__}", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"⚠️ 下载失败 (HTTP/其他错误): {url} | 错误: {e}", file=sys.stderr, flush=True)
+            print(f"⚠️ 下载失败: {url} | 错误: {e.__class__.__name__}", file=sys.stderr, flush=True)
             
     all_lines = "\n".join(all_content).split('\n')
     unique_nodes = set()
@@ -81,11 +76,9 @@ def fetch_and_parse_nodes():
 
 
 def test_single_node(node_link):
-    # temp_dir 只用于存放 config 和 log 文件，GeoData 在共享目录
     clash_process = None
     
     try:
-        # 使用 TemporaryDirectory 确保自动清理 config/log
         with tempfile.TemporaryDirectory(prefix="mihomo_test_") as temp_dir: 
             
             proxy_name_final = "NODE"
@@ -103,7 +96,6 @@ def test_single_node(node_link):
                 if VERBOSE and MAX_RETRIES > 1:
                     print(f"  第 {attempt+1}/{MAX_RETRIES} 次尝试", flush=True)
                 
-                # --- 每次尝试前，确保上一个进程已清理 ---
                 if clash_process:
                     clash_process.terminate() 
                     try:
@@ -132,6 +124,7 @@ def test_single_node(node_link):
                     if raw_protocol in ['hy2', 'hysteria2']:
                         protocol = 'hysteria2'
 
+                    # VLESS 解析 (保持 V6 一致)
                     if protocol == 'vless':
                         uuid = url_parts.username
                         server = url_parts.hostname
@@ -168,7 +161,10 @@ def test_single_node(node_link):
     uuid: {uuid}
     udp: true
 {flow_config}{tls_config}{transport_config}"""
-
+                    
+                    # (省略其他协议的解析代码，保持 V6 一致)
+                    
+                    # TROJAN
                     elif protocol == 'trojan':
                         password = url_parts.username or ""
                         server = url_parts.hostname
@@ -189,6 +185,7 @@ def test_single_node(node_link):
     password: {password}
 {tls_config}{ws_config}"""
 
+                    # VMESS
                     elif protocol == 'vmess':
                         body = node_link[8:].split('#')[0]
                         body += '=' * ((4 - len(body) % 4) % 4)
@@ -219,7 +216,8 @@ def test_single_node(node_link):
     cipher: {scy}
     udp: true
 {tls_config}{network_config}"""
-
+                    
+                    # HYSTERIA2
                     elif protocol == 'hysteria2':
                         password = url_parts.username or ""
                         server = url_parts.hostname
@@ -257,15 +255,15 @@ def test_single_node(node_link):
                         print(f"  ❌ 解析失败: {e}", flush=True)
                     return False, node_link, 99999
 
-                # --- 写入配置并启动 mihomo (新增 GeoData 配置) ---
+                # --- 写入配置并启动 mihomo ---
                 yaml_content = f"""log-level: info
 allow-lan: false
 mode: rule
 mixed-port: {proxy_port}
 external-controller: 127.0.0.1:{api_port}
 secret: githubactions
-geodata-dir: {SHARED_GEO_DIR} # <--- 使用共享目录
-geodata-loader: memconservative # <--- 加速启动
+geodata-dir: {SHARED_GEO_DIR}
+geodata-loader: memconservative
 
 proxies:
 {proxy_config_yaml}
@@ -290,7 +288,6 @@ proxy-groups:
                 headers = {'Authorization': 'Bearer githubactions'}
                 api_started = False
                 
-                # 等待 MAX_API_WAIT_TIME (30秒)
                 for _ in range(API_WAIT_LOOPS): 
                     try:
                         r = requests.get(api_url, headers=headers, timeout=1)
@@ -356,7 +353,6 @@ proxy-groups:
     except Exception as e:
         print(f"未知异常: {e}", file=sys.stderr, flush=True)
     finally:
-        # 最终清理确保没有残留
         if clash_process:
             clash_process.terminate()
             try:
@@ -384,7 +380,6 @@ def run_parallel_tests(all_nodes):
                 remark = link.split('#')[-1][:40] if '#' in link else '无备注'
                 mark = "✅" if status else "❌"
                 delay_str = f"{delay_ms}ms" if status else "失败"
-                # 打印进度和结果
                 print(f"[{completed:>{len(str(len(valid_nodes)))}}/{len(valid_nodes)}] {mark} {delay_str} → {remark}", flush=True)
 
             except Exception as e:
@@ -429,8 +424,11 @@ if __name__ == "__main__":
 
     os.system("chmod +x ./mihomo-linux-amd64")
     
-    # ⚠️ 关键调整：由于您已手动下载 GeoData，此处不再进行检查或下载，直接使用本地文件。
-    print(f"✅ 脚本已调整：将直接使用 {SHARED_GEO_DIR} 目录下的 GeoData 文件进行启动。", flush=True)
+    # 强制清理：防止上一次运行残留的僵尸进程占用端口
+    print("🧹 强制清理残留进程...", flush=True)
+    os.system("killall mihomo-linux-amd64 || true") 
+    
+    print(f"✅ 脚本已调整：将以 MAX_WORKERS={MAX_WORKERS} 的低并发运行，并使用 {SHARED_GEO_DIR} 目录下的 GeoData 文件。", flush=True)
 
     # 步骤 1：获取节点
     all_nodes = fetch_and_parse_nodes()
