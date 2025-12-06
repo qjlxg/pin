@@ -1,4 +1,4 @@
-# test_connectivity_parallel.py (最终解析修复版：解决 YAML unmarshal 致命错误)
+# test_connectivity_parallel.py (最终稳定运行版：修复代理组循环)
 import os
 import sys
 import datetime
@@ -34,7 +34,7 @@ MAX_RETRIES = 2
 
 def fetch_and_parse_nodes():
     """
-    下载远程文件，解析出潜在的节点链接，包括 Hysteria 协议。
+    下载远程文件，解析出潜在的节点链接。
     """
     print("--- 1. 正在获取和解析所有节点 ---")
     
@@ -75,7 +75,6 @@ def test_single_node(node_link):
         clash_process = None
         
         try:
-            # 确保每个线程/尝试都有独特的端口和文件，解决高并发冲突
             unique_id = f"{os.getpid()}_{attempt}_{int(time.time()*1000)}" 
             api_port = 19190 + os.getpid() % 100 + hash(node_link) % 1000 + attempt 
         except:
@@ -86,7 +85,7 @@ def test_single_node(node_link):
         CONFIG_PATH = f"config_{unique_id}.yaml"
         LOG_PATH = f"mihomo_{unique_id}.log"
         API_HOST = "127.0.0.1"
-        proxy_name_final = node_link.split('://')[0].upper() 
+        proxy_name_final = node_link.split('://')[0].upper() # 默认名称
         
         # 1. 构造配置 - 确保代理名称安全
         proxy_name_match = re.search(r'name=([^&]+)', node_link)
@@ -96,6 +95,9 @@ def test_single_node(node_link):
                 proxy_name_final = raw_name.replace("'", "").replace("\"", "").replace(":", "").replace("[", "(").replace("]", ")")
             except Exception:
                 pass
+        
+        # 设定一个不会与节点名冲突的群组名称
+        GROUP_NAME = "NODE_TEST_GROUP" 
 
         # === 核心修复：手动解析链接并构造 Mihomo YAML 格式 ===
         proxy_config_yaml = ""
@@ -103,35 +105,32 @@ def test_single_node(node_link):
 
         try:
             if protocol == 'trojan':
-                # 匹配 trojan://password@host:port/ or trojan://password@host:port?params
                 match = re.search(r'trojan://([^@]+)@([^:/]+):(\d+)', node_link)
                 if match:
                     password, server, port = match.groups()
-                    # 构造正确的 Mihomo YAML 代理定义 (Map结构)
+                    # 构造正确的 Mihomo YAML 代理定义，并显式设置 tls: true (Trojan 默认需要)
                     proxy_config_yaml = f"""
   - name: {proxy_name_final}
     type: trojan
     server: {server}
     port: {port}
     password: {password}
-    # 默认 tls: true, skip-cert-verify: false
+    tls: true
 """
                 else:
-                    # 如果格式不匹配，则可能是一个格式复杂的 Trojan 链接，视为解析失败
                     raise ValueError("Trojan 链接格式不符合标准解析要求。")
             
-            # TODO: 如果未来需要支持 Vmess/SS/Vless，需要在此处添加对应的 base64/URL 解析逻辑
+            # 由于您的链接主要来自 trojan_links.txt，我们暂时只实现 Trojan 的解析。
+            # 如需支持 Vmess/SS/Vless/Hysteria，需要在此处添加对应的解析逻辑。
 
             if not proxy_config_yaml:
-                # 如果解析失败（或遇到了其他未实现的协议），则打印错误并返回失败
-                print(f"\n❌ FATAL ERROR: 无法解析 {protocol.upper()} 链接到 Mihomo YAML 格式: {node_link[:50]}...")
-                return False, node_link
+                # 如果解析失败，则可能是链接格式复杂或协议未实现
+                return False, node_link # 直接返回失败
 
-        except Exception as e:
-            # 如果解析过程中出现异常，直接终止当前测试
-            print(f"\n❌ FATAL PARSE ERROR: 处理 {protocol.upper()} 链接失败: {e}")
-            return False, node_link
+        except Exception:
+            return False, node_link # 解析异常，返回失败
 
+        # === 核心修复：代理组使用固定名称，避免循环引用 ===
         yaml_content = f"""
 mixed-port: 7890
 external-controller: {API_HOST}:{api_port}
@@ -139,10 +138,10 @@ secret: githubactions
 proxies:
 {proxy_config_yaml}  # 插入正确的 YAML Map 结构
 proxy-groups:
-  - name: {quote(proxy_name_final)} 
+  - name: {GROUP_NAME}
     type: select
     proxies:
-      - {proxy_name_final}
+      - {proxy_name_final} # 引用单个节点的名称
 """
         
         # 2. 保存配置
@@ -185,10 +184,11 @@ proxy-groups:
             time.sleep(1) 
             
             # 5. --- 多目标 URL 连通性测试 ---
-            encoded_proxy_name = quote(proxy_name_final)
+            # 直接对单个节点进行延迟测试
+            encoded_proxy_name_for_delay = quote(proxy_name_final)
             
             for test_url in TEST_URLS:
-                api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
+                api_delay_url = f"http://{API_HOST}:{api_port}/proxies/{encoded_proxy_name_for_delay}/delay?url={quote(test_url)}&timeout={NODE_TIMEOUT}000"
                 
                 try:
                     response = requests.get(api_delay_url, headers=headers, timeout=NODE_TIMEOUT)
@@ -216,8 +216,10 @@ proxy-groups:
                             mihomo_log_content = f.read()
                         
                         if mihomo_log_content.strip():
+                            # 只打印前 2000 个字符以避免日志过长
                             print(f"\n--- ❌ 节点 {proxy_name_final} 调试日志 (尝试 {attempt+1}/{MAX_RETRIES}) ---", file=sys.stderr)
-                            print(mihomo_log_content, file=sys.stderr)
+                            print(mihomo_log_content[:2000], file=sys.stderr)
+                            print("..." if len(mihomo_log_content) > 2000 else "", file=sys.stderr)
                             print("-" * 50, file=sys.stderr)
                             
                     except Exception:
