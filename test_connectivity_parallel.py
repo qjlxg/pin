@@ -26,7 +26,7 @@ TEST_URLS = [
     "http://www.microsoft.com",
 ]
 
-MAX_WORKERS = 25     # 稳定后建议 20-30
+MAX_WORKERS = 10     # 稳定后建议 20-30
 NODE_TIMEOUT = 12
 MAX_RETRIES = 2
 VERBOSE = True       # 全局详细日志开关（默认开）
