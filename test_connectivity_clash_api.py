@@ -18,8 +18,9 @@ REMOTE_CONFIG_URLS = [
 ]
 
 # *** 核心：本地可执行文件路径 ***
+# YML 文件确保了这两个文件在执行脚本时存在且具有执行权限
 LOCAL_MIHOMO_FILENAME = "mihomo-linux-amd64" 
-LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" # Subconverter 路径
+LOCAL_SUB_EXECUTABLE = "./subconverter-linux64" 
 
 CLASH_EXECUTABLE = f"./{LOCAL_MIHOMO_FILENAME}"
 CLASH_CONFIG_PATH = "mihomo_config.yaml"
@@ -34,7 +35,7 @@ def download_clash_core():
     """检查本地 Mihomo 核心文件是否存在。"""
     print("--- 1. 正在检查本地 Mihomo 核心 ---")
     
-    # 授权操作已移至 YML 文件中，这里只做存在性检查
+    # 检查 YML 文件中已授权的文件是否存在
     if not os.path.exists(CLASH_EXECUTABLE):
         print(f"❌ 错误：本地 Mihomo 核心文件未找到，路径：{CLASH_EXECUTABLE}", file=sys.stderr)
         return False
@@ -74,8 +75,9 @@ def convert_nodes_with_local_subconverter(encoded_virtual_sub):
     """通过本地 Subconverter 可执行文件将 Base64 链接转换为 Clash YAML。"""
     print("--- 3. 正在调用本地 Subconverter 转换配置 (支持 Vmess/Trojan/VLESS/SS 等) ---")
     
+    # YML 已经处理了文件是否存在和授权的问题
     if not os.path.exists(LOCAL_SUB_EXECUTABLE):
-        print(f"❌ 错误：本地 Subconverter 文件未找到，请检查工作流步骤是否成功下载：{LOCAL_SUB_EXECUTABLE}", file=sys.stderr)
+        print(f"❌ 错误：本地 Subconverter 文件未找到。 (应在 YML 中修复)", file=sys.stderr)
         return False
 
     # 构建 Subconverter 命令行参数
